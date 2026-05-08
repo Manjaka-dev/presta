@@ -1,0 +1,121 @@
+const getConfig = () => {
+  const baseUrl = import.meta.env.VITE_PRESTA_BASE_URL
+  const apiKey = import.meta.env.VITE_PRESTA_API_KEY
+  const proxyFlag = import.meta.env.VITE_PRESTA_USE_PROXY
+
+  return {
+    baseUrl,
+    apiKey,
+    proxyFlag,
+  }
+}
+
+const buildRelativeUrl = (baseUrl, endpoint, params = {}) => {
+  const normalizedBase = baseUrl ? baseUrl.replace(/\/$/, '') : ''
+  const path = `${normalizedBase}/api/${endpoint}`
+  const searchParams = new URLSearchParams()
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return
+    }
+    searchParams.set(key, value)
+  })
+
+  const query = searchParams.toString()
+  return query ? `${path}?${query}` : path
+}
+
+const buildUrl = (endpoint, params = {}) => {
+  const { baseUrl, proxyFlag } = getConfig()
+  const normalizedFlag = proxyFlag === 'true' ? true : proxyFlag === 'false' ? false : undefined
+  const isLocalhost = Boolean(baseUrl && /^https?:\/\/localhost(?::\d+)?(\/|$)/.test(baseUrl))
+  const shouldUseProxy = import.meta.env.DEV && (normalizedFlag ?? (!baseUrl || isLocalhost))
+
+  if (shouldUseProxy) {
+    return buildRelativeUrl('', endpoint, params)
+  }
+
+  if (!baseUrl) {
+    return buildRelativeUrl('', endpoint, params)
+  }
+
+  const normalizedBase = baseUrl.replace(/\/$/, '')
+
+  if (normalizedBase.startsWith('http://') || normalizedBase.startsWith('https://')) {
+    const url = new URL(`${normalizedBase}/api/${endpoint}`)
+
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '') {
+        return
+      }
+      url.searchParams.set(key, value)
+    })
+
+    return url.toString()
+  }
+
+  return buildRelativeUrl(normalizedBase, endpoint, params)
+}
+
+const buildHeaders = (extraHeaders = {}) => {
+  const { apiKey } = getConfig()
+  const headers = {
+    ...extraHeaders,
+  }
+
+  if (apiKey) {
+    headers.Authorization = `Basic ${btoa(`${apiKey}:`)}`
+  }
+
+  return headers
+}
+
+const requestRaw = async (method, endpoint, body = null, params = {}, extraHeaders = {}) => {
+  const url = buildUrl(endpoint, params)
+  const headers = buildHeaders(extraHeaders)
+
+  const response = await fetch(url, {
+    method,
+    headers,
+    body,
+  })
+
+  const text = await response.text()
+
+  if (!response.ok) {
+    throw new Error(text || `Request failed with status ${response.status}`)
+  }
+
+  return text
+}
+
+const requestJson = async (method, endpoint, body = null, params = {}) => {
+  const text = await requestRaw(
+    method,
+    endpoint,
+    body,
+    params,
+    {
+      'Output-Format': 'JSON',
+      Accept: 'application/json',
+    }
+  )
+
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    return { __raw: text }
+  }
+}
+
+const requestXml = async (method, endpoint, xmlBody, params = {}) => {
+  const body = xmlBody || ''
+
+  return requestRaw(method, endpoint, body, params, {
+    'Content-Type': 'text/xml',
+    Accept: 'text/xml',
+  })
+}
+
+export { requestRaw, requestJson, requestXml }
