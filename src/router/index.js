@@ -2,6 +2,9 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import Home from '../views/Home.vue'
 import FrontOfficeHome from '../views/front/FrontOfficeHome.vue'
+import ProductCatalog from '../views/front/ProductCatalog.vue'
+import ProductDetailView from '../views/front/ProductDetailView.vue'
+import CartView from '../views/front/CartView.vue'
 import BackOfficeHome from '../views/back/BackOfficeHome.vue'
 import ResetFront from '../components/backoffice/reset/ResetFront.vue'
 import OrdersBackoffice from '../components/backoffice/orders/OrdersBackoffice.vue'
@@ -19,6 +22,21 @@ const router = createRouter({
       path: '/front',
       name: 'front-home',
       component: FrontOfficeHome,
+    },
+    {
+      path: '/front/products',
+      name: 'front-products',
+      component: ProductCatalog,
+    },
+    {
+      path: '/front/products/:id',
+      name: 'front-product-detail',
+      component: ProductDetailView,
+    },
+    {
+      path: '/front/cart',
+      name: 'front-cart',
+      component: CartView,
     },
     {
       path: '/back',
