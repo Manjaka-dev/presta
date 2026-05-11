@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { allResources } from '@/config/resources.js'
 import { getRequiredFields } from '@/config/requiredFields.js'
-import { resourceApi } from '../../../api/resources'
+import { resourceApi } from '@/api/resources'
 import { processQueue, retry } from '@/utils/asyncQueue.js'
 import { buildXmlFromRow, parseCsv, validateRequired, parseXmlRoot } from '@/utils/csv.js'
 
@@ -286,9 +286,15 @@ watch(resourceKey, () => {
 
     <section class="card">
       <h2>Preview</h2>
-      <div v-if="previewRows.length" class="list-table">
-        <div class="list-table__container">
-          <table class="list-table__table">
+        <div v-if="previewRows.length" class="list-table">
+        <!-- fixed-size preview container with both-axis scrolling (inline styles to ensure enforcement) -->
+        <div
+          class="list-table__container csv-preview__container"
+          style="height:360px; max-height:360px; overflow:auto; display:block;"
+          role="region"
+          aria-label="Aperçu CSV"
+        >
+          <table class="list-table__table" style="min-width:max-content; width:auto;">
             <thead>
               <tr>
                 <th v-for="header in fileState.headers" :key="header">{{ header }}</th>

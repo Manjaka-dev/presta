@@ -1,7 +1,7 @@
 <script setup>
 import { computed, reactive, watch, watchEffect } from 'vue'
-import { resourceApi } from '../api/resources'
-import { getResource } from '../config/resources'
+import { resourceApi } from '@/api/resources'
+import { getResource } from '@/config/resources'
 
 const props = defineProps({
   resourceKey: {

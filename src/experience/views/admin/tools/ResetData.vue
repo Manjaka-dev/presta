@@ -1,12 +1,12 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { allResources } from '@/config/resources.js'
-import { resourceApi } from '../../../api/resources'
+import { resourceApi } from '@/api/resources'
 import { processQueue, retry } from '@/utils/asyncQueue.js'
 import { extractItems } from '@/utils/resourceData.js'
 
-const resourceKey = ref(allResources[0]?.key || '')
-const resource = computed(() => allResources.find((item) => item.key === resourceKey.value))
+const selectedResources = ref([])
+const resources = computed(() => allResources.filter((item) => selectedResources.value.includes(item.key)))
 
 const state = reactive({
   loading: false,
@@ -20,51 +20,60 @@ const state = reactive({
   backoffMs: 1000,
 })
 
-const canDelete = computed(() => resource.value?.methods.includes('delete'))
+const canDelete = computed(() => {
+  return resources.value.length > 0 && resources.value.every(r => r.methods.includes('delete'))
+})
 
 const fetchIds = async () => {
-  if (!resourceKey.value) {
+  if (!selectedResources.value.length) {
     return
   }
 
-  const api = resourceApi(resourceKey.value)
   state.loading = true
   state.errors = []
-  state.ids = []
+  state.ids = []  // Réinitialiser
   state.success = 0
   state.failed = 0
 
-  try {
-    const data = await api.list({ display: '[id]' })
-    const items = extractItems(data, api.resource)
-    state.ids = items
-      .map((item) => item.id || item[api.resource.key])
-      .filter((value) => value !== undefined && value !== null)
-  } catch (error) {
-    state.errors = [error instanceof Error ? error.message : String(error)]
-  } finally {
-    state.loading = false
+  for (const resourceKey of selectedResources.value) {
+    const api = resourceApi(resourceKey)
+    try {
+      const data = await api.list({ display: '[id]' })
+      const items = extractItems(data, api.resource)
+      const ids = items
+          .map((item) => item.id || item[api.resource.key])
+          .filter((value) => value !== undefined && value !== null)
+
+      // Stocker les IDs avec la ressource associée
+      state.ids.push(
+          ...ids.map(id => ({ resourceKey, id }))
+      )
+    } catch (error) {
+      state.errors.push(`${resourceKey}: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
+
+  state.loading = false
 }
 
 const startReset = async () => {
-  if (!resourceKey.value || !state.ids.length || state.running) {
+  if (!selectedResources.value.length || !state.ids.length || state.running) {
     return
   }
 
-  const api = resourceApi(resourceKey.value)
   state.running = true
   state.errors = []
   state.success = 0
   state.failed = 0
 
-  const worker = async (id) => {
+  const worker = async (item) => {
+    const api = resourceApi(item.resourceKey)
     try {
-      await retry(() => api.remove(id), state.retries, state.backoffMs)
+      await retry(() => api.remove(item.id), state.retries, state.backoffMs)
       state.success += 1
     } catch (error) {
       state.failed += 1
-      state.errors.push(error instanceof Error ? error.message : String(error))
+      state.errors.push(`${item.resourceKey} (${item.id}): ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -89,12 +98,11 @@ const startReset = async () => {
     <div class="tool-grid">
       <section class="card">
         <h2>Resource</h2>
-        <label>
-          Resource
-          <select v-model="resourceKey">
-            <option v-for="item in allResources" :key="item.key" :value="item.key">{{ item.label }}</option>
-          </select>
-        </label>
+        <div class="resource-checkboxes">
+          <label v-for="item in allResources" :key="item.key" class="checkbox-label">
+            <input type="checkbox" :value="item.key" v-model="selectedResources" />{{ item.label }}
+          </label>
+        </div>
 
         <div class="button-row">
           <button class="button button--ghost" type="button" @click="fetchIds" :disabled="state.loading">
@@ -111,6 +119,7 @@ const startReset = async () => {
       <section class="card">
         <h2>Progress</h2>
         <div class="summary-grid">
+          <div class="summary-card">Resources: {{ selectedResources.length }}</div>
           <div class="summary-card">Ids: {{ state.ids.length }}</div>
           <div class="summary-card">Success: {{ state.success }}</div>
           <div class="summary-card">Failed: {{ state.failed }}</div>
@@ -142,3 +151,26 @@ const startReset = async () => {
   </section>
 </template>
 
+<style>
+.resource-checkboxes {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  padding: 12px;
+  border-radius: 4px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.checkbox-label input {
+  cursor: pointer;
+}
+</style>

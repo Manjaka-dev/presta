@@ -119,6 +119,36 @@ a {
   min-height: 100vh;
 }
 
+/* when collapsed, shrink the sidebar and hide text labels */
+.admin-layout.admin-layout--collapsed {
+  grid-template-columns: 64px 1fr;
+}
+
+.admin-layout.admin-layout--collapsed .admin-nav {
+  padding: 1rem 0.25rem;
+}
+
+.admin-layout.admin-layout--collapsed .admin-nav__brand-link,
+.admin-layout.admin-layout--collapsed .admin-nav__title {
+  display: none;
+}
+
+.admin-layout.admin-layout--collapsed .admin-nav__link {
+  padding: 0.4rem 0.35rem;
+  text-align: center;
+  /* hide link text when collapsed (no icons available by default) */
+  font-size: 0;
+}
+
+.admin-nav__toggle{
+  float: right;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
 .admin-layout__content {
   padding: 2rem;
 }
@@ -284,8 +314,36 @@ input {
   background: #fff;
 }
 
-.list-table__table {
+/* CSV preview: fixed size and allow scrolling both horizontally and vertically
+   Constrain width to container so the table does not expand the page layout. */
+.csv-preview__container {
+  /* fixed height for preview */
+  height: 360px;
+  max-height: 360px;
   width: 100%;
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  display: block;
+}
+
+/* allow parent flex/grid items to shrink so the preview box controls overflow */
+.card,
+.list-table,
+.list-table__container {
+  min-width: 0;
+}
+
+.csv-preview__container .list-table__table th,
+.csv-preview__container .list-table__table td {
+  white-space: nowrap;
+}
+
+.list-table__table {
+  /* prefer intrinsic width; preview container will force overflow when needed */
+  width: auto;
   border-collapse: collapse;
   font-size: 0.9rem;
 }
@@ -411,3 +469,27 @@ select {
     grid-template-columns: 1fr;
   }
 }
+
+/* Stronger overrides for CSV preview to ensure fixed height and scrolling */
+.list-table__container.csv-preview__container {
+  height: 360px !important;
+  max-height: 360px !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+  display: block !important;
+}
+
+.list-table__container.csv-preview__container table,
+.list-table__container.csv-preview__container .list-table__table {
+  /* do not force the table to force-layout the page; let the container handle overflow */
+  width: auto !important;
+  min-width: max-content !important; /* allow intrinsic table width so horizontal scroll appears inside the preview */
+}
+
+.list-table__container.csv-preview__container th,
+.list-table__container.csv-preview__container td {
+  white-space: nowrap !important;
+}
+

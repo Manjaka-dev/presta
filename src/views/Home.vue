@@ -1,11 +1,14 @@
 <template>
   <section class="home">
     <div class="home__content">
-      <h1>PrestaShop Admin UI</h1>
+      <h1>Choix d'espace</h1>
       <p class="muted">
-        Interface d'administration pour gerer toutes les ressources PrestaShop via Webservice.
+        Selectionnez l'espace a ouvrir.
       </p>
-      <RouterLink to="/admin" class="button">Go to admin</RouterLink>
+      <div class="button-row" style="justify-content: center;">
+        <RouterLink to="/front" class="button">Aller au front office</RouterLink>
+        <RouterLink to="/back" class="button button--ghost">Aller au back office</RouterLink>
+      </div>
     </div>
   </section>
 </template>

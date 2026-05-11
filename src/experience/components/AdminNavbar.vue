@@ -1,5 +1,19 @@
 <script setup>
-import { categories } from '../config/resources'
+import { categories } from '@/config/resources'
+import { computed } from 'vue'
+
+// accept v-model:collapsed from parent
+const props = defineProps({ modelValue: { type: Boolean, default: false } })
+const emit = defineEmits(['update:modelValue'])
+
+const collapsed = computed({
+  get: () => props.modelValue,
+  set: (v) => emit('update:modelValue', v),
+})
+
+const toggle = () => {
+  collapsed.value = !collapsed.value
+}
 
 const tools = [
   { key: 'import-csv', label: 'CSV import', route: '/admin/tools/import-csv' },
@@ -8,9 +22,13 @@ const tools = [
 </script>
 
 <template>
-  <nav class="admin-nav">
+  <nav :class="['admin-nav', { 'is-collapsed': collapsed }]">
     <div class="admin-nav__brand">
       <RouterLink to="/admin" class="admin-nav__brand-link">Presta Admin</RouterLink>
+      <button class="admin-nav__toggle" @click="toggle" :aria-label="collapsed ? 'Expand menu' : 'Collapse menu'">
+        <span v-if="!collapsed">◀</span>
+        <span v-else>▶</span>
+      </button>
     </div>
 
     <div class="admin-nav__sections">
