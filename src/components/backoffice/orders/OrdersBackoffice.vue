@@ -422,4 +422,3 @@ init()
   font-size: 0.75rem;
 }
 </style>
-

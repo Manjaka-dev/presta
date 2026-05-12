@@ -18,7 +18,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost',
+        // Use VITE_PRESTA_BASE_URL if provided (allows specifying port), fallback to http://localhost
+        target: process.env.VITE_PRESTA_BASE_URL || 'http://localhost',
         changeOrigin: true,
         secure: false,
       },

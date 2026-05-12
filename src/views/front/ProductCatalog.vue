@@ -205,6 +205,9 @@ loadProducts()
         <p class="muted">Parcourez notre sélection de produits</p>
       </div>
       <div class="catalog-header__cart">
+        <RouterLink to="/front/orders" class="button button--ghost">
+          Mes commandes
+        </RouterLink>
         <RouterLink to="/front/cart" class="button button--primary">
           🛒 Panier
           <span v-if="cartItemCount > 0" class="badge">{{ cartItemCount }}</span>

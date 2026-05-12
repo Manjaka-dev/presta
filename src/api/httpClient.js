@@ -75,6 +75,17 @@ const requestRaw = async (method, endpoint, body = null, params = {}, extraHeade
   const url = buildUrl(endpoint, params)
   const headers = buildHeaders(extraHeaders)
 
+  // Debug: afficher l'URL exacte et les params si activé via VITE_PRESTA_DEBUG_API=true
+  try {
+    const debugEnabled = import.meta.env.VITE_PRESTA_DEBUG_API === 'true'
+    if (debugEnabled) {
+      // Afficher l'URL telle qu'envoyée et les paramètres bruts
+      console.debug('[httpClient] request', { method, url, params, headers, body })
+    }
+  } catch (e) {
+    // Not blocking if import.meta is unavailable in some contexts
+  }
+
   const response = await fetch(url, {
     method,
     headers,
@@ -84,7 +95,17 @@ const requestRaw = async (method, endpoint, body = null, params = {}, extraHeade
   const text = await response.text()
 
   if (!response.ok) {
-    throw new Error(text || `Request failed with status ${response.status}`)
+    // Log response details to help debugging (status + body + url)
+    try {
+      console.error('[httpClient] request failed', { url, status: response.status, body: text })
+    } catch (e) {
+      // ignore logging errors
+    }
+    // Attach status and response body to the Error object so callers/logging can inspect them
+    const err = new Error(text || `Request failed with status ${response.status}`)
+    err.status = response.status
+    err.body = text
+    throw err
   }
 
   return text

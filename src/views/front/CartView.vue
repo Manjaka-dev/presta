@@ -1,6 +1,8 @@
 <script setup>
+import { useRouter } from 'vue-router'
 import { useCart } from '@/api/useCart'
 
+const router = useRouter()
 const { items, totalPrice, removeItem, updateQuantity, clearCart } = useCart()
 
 const handleQuantityChange = (identifier, newQty) => {
@@ -12,11 +14,11 @@ const handleQuantityChange = (identifier, newQty) => {
 }
 
 const proceedToCheckout = () => {
-  alert('Fonction de paiement en construction')
-  console.info('[Cart] Proceeding to checkout', {
-    itemsCount: items.value.length,
-    total: totalPrice.value,
-  })
+  if (items.value.length === 0) {
+    alert('Votre panier est vide')
+    return
+  }
+  router.push({ name: 'front-checkout' })
 }
 </script>
 

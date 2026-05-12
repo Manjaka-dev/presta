@@ -1,7 +1,27 @@
 import { reactive, computed } from 'vue'
 
+const CART_STORAGE_KEY = 'client_presta_cart'
+
+const loadCartFromStorage = () => {
+  try {
+    const stored = localStorage.getItem(CART_STORAGE_KEY)
+    return stored ? JSON.parse(stored) : []
+  } catch (e) {
+    console.warn('[useCart] Failed to load cart from localStorage:', e)
+    return []
+  }
+}
+
+const saveCartToStorage = (items) => {
+  try {
+    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items))
+  } catch (e) {
+    console.warn('[useCart] Failed to save cart to localStorage:', e)
+  }
+}
+
 const cartState = reactive({
-  items: [],
+  items: loadCartFromStorage(),
 })
 
 export const useCart = () => {
@@ -22,6 +42,7 @@ export const useCart = () => {
         variantLabel: product.variantLabel || '',
       })
     }
+    saveCartToStorage(cartState.items)
   }
 
   const removeItem = (identifier) => {
@@ -29,6 +50,7 @@ export const useCart = () => {
     if (index > -1) {
       cartState.items.splice(index, 1)
     }
+    saveCartToStorage(cartState.items)
   }
 
   const updateQuantity = (identifier, quantity) => {
@@ -36,10 +58,12 @@ export const useCart = () => {
     if (item) {
       item.quantity = Math.max(1, quantity)
     }
+    saveCartToStorage(cartState.items)
   }
 
   const clearCart = () => {
     cartState.items = []
+    saveCartToStorage(cartState.items)
   }
 
   const itemCount = computed(() => {

@@ -4,7 +4,10 @@ import Home from '../views/Home.vue'
 import FrontOfficeHome from '../views/front/FrontOfficeHome.vue'
 import ProductCatalog from '../views/front/ProductCatalog.vue'
 import ProductDetailView from '../views/front/ProductDetailView.vue'
+import OrdersView from '../views/front/OrdersView.vue'
+import OrderDetailView from '../views/front/OrderDetailView.vue'
 import CartView from '../views/front/CartView.vue'
+import CheckoutView from '../views/front/CheckoutView.vue'
 import BackOfficeHome from '../views/back/BackOfficeHome.vue'
 import ResetFront from '../components/backoffice/reset/ResetFront.vue'
 import OrdersBackoffice from '../components/backoffice/orders/OrdersBackoffice.vue'
@@ -37,6 +40,21 @@ const router = createRouter({
       path: '/front/cart',
       name: 'front-cart',
       component: CartView,
+    },
+    {
+      path: '/front/checkout',
+      name: 'front-checkout',
+      component: CheckoutView,
+    },
+    {
+      path: '/front/orders',
+      name: 'front-orders',
+      component: OrdersView,
+    },
+    {
+      path: '/front/orders/:id',
+      name: 'front-order-detail',
+      component: OrderDetailView,
     },
     {
       path: '/back',
