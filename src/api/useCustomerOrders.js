@@ -31,8 +31,8 @@ export const loadCustomerOrders = async (customerId) => {
   const api = resourceApi('orders')
   const response = await api.list({
     'filter[id_customer]': customerId,
-    display: '[id,id_customer,reference,current_state,total_paid,date_add]',
-    sort: '[date_add_DESC]',
+    display: 'full',
+    sort: '[id_DESC]',
     limit: 100
   })
   // Debug: afficher la réponse brute pour aider à diagnostiquer les erreurs liées aux filtres
@@ -67,7 +67,7 @@ export const loadCustomerOrderDetail = async (customerId, orderId) => {
   const [statusMap, detailsResponse, historiesResponse] = await Promise.all([
     getStatusMap(),
     resourceApi('order_details').list({ 'filter[id_order]': orderId, display: '[id_order,product_name,product_quantity,unit_price_tax_incl,total_price_tax_incl]', limit: 500 }),
-    resourceApi('order_histories').list({ 'filter[id_order]': orderId, display: '[id_order,id_order_state,date_add]', sort: '[date_add_ASC]', limit: 500 }),
+    resourceApi('order_histories').list({ 'filter[id_order]': orderId, display: 'full', sort: '[id_ASC]', limit: 500 }),
   ])
 
   // Debug: afficher les réponses brutes des détails et historques de commande

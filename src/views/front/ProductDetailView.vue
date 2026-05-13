@@ -9,7 +9,7 @@ import ProductMetaPanel from '@/components/front/product/ProductMetaPanel.vue'
 import ProductVariantSelector from '@/components/front/product/ProductVariantSelector.vue'
 import ProductPurchaseBox from '@/components/front/product/ProductPurchaseBox.vue'
 
-const route = useRoute(); const { addItem } = useCart(); const productId = parseInt(route.params.id)
+const route = useRoute(); const { addItem, itemCount: cartItemCount } = useCart(); const productId = parseInt(route.params.id)
 const state = reactive({ loading: true, error: '', product: null, images: [], categories: [], combinations: [] })
 const view = reactive({ activeImageIndex: 0, quantity: 1, selectedVariants: {} })
 const toArray = (v) => Array.isArray(v) ? v : v ? [v] : []
@@ -61,7 +61,7 @@ const currentPrice = computed(() => ((parseFloat(state.product?.price || 0)) + (
 const hasVariants = computed(() => groups.value.length > 0)
 const availableQty = computed(() => hasVariants.value && !selectedCombination.value ? 0 : (selectedCombination.value ? parseInt(selectedCombination.value.quantity || 0) : parseInt(state.product?.quantity || 0)))
 const isAvailable = computed(() => availableQty.value > 0)
-const availLabel = computed(() => hasVariants.value && !selectedCombination.value ? 'Choisissez vos options' : (isAvailable.value ? 'Disponible' : 'Rupture de stock'))
+const availLabel = computed(() => hasVariants.value && !selectedCombination.value ? 'Choisissez vos options' : (isAvailable.value ? `Disponible (${availableQty.value})` : 'Rupture de stock'))
 const activeImageUrl = computed(() => state.images[view.activeImageIndex]?.url || state.images[0]?.url || '/images/placeholder-product.png')
 
 const groups = computed(() => {
@@ -77,7 +77,30 @@ const groups = computed(() => {
 
 const selectVariant = ({ groupId, optionId }) => { view.selectedVariants[String(groupId)] = String(optionId); view.activeImageIndex = 0 }
 const seed = () => { const c = state.combinations.find(x => x.quantity > 0) || state.combinations[0]; if (c) c.attributes.forEach(a => { if (!view.selectedVariants[String(a.groupId)]) view.selectedVariants[String(a.groupId)] = String(a.id) }) }
-const add = () => { if (!state.product || !isAvailable.value) return; const key = selectedCombination.value ? `${state.product.id}:${selectedCombination.value.id}` : `${state.product.id}`; addItem({ id: state.product.id, combinationId: selectedCombination.value?.id || null, itemKey: key, name: state.product.name, variantLabel: selectionSummary.value, price: currentPrice.value, imageUrl: activeImageUrl.value }, view.quantity); state.error = `${state.product.name} ajouté au panier !`; setTimeout(() => { if (state.error.includes('ajouté au panier')) state.error = '' }, 1500) }
+
+const add = () => {
+  if (!state.product || !isAvailable.value) return;
+
+  const key = selectedCombination.value ? `${state.product.id}:${selectedCombination.value.id}` : `${state.product.id}`;
+  const maxQty = availableQty.value;
+
+  try {
+    addItem({
+      id: state.product.id,
+      combinationId: selectedCombination.value?.id || null,
+      itemKey: key,
+      name: state.product.name,
+      variantLabel: selectionSummary.value,
+      price: currentPrice.value,
+      imageUrl: activeImageUrl.value
+    }, view.quantity, maxQty);
+
+    state.error = `${state.product.name} ajouté au panier !`;
+    setTimeout(() => { if (state.error.includes('ajouté au panier')) state.error = '' }, 1500)
+  } catch (error) {
+    state.error = error.message;
+  }
+}
 
 const load = async () => {
   state.loading = true; state.error = ''; console.info('[ProductDetail] load start', { route: route.fullPath, productId })
@@ -105,7 +128,14 @@ onMounted(() => { console.info('[ProductDetail] mounted', { routeParams: route.p
 
 <template>
   <section class="product-page">
-    <nav class="breadcrumb"><RouterLink to="/front/products">Catalogue</RouterLink><span v-if="state.product" class="breadcrumb__sep">/</span><span v-if="state.product" class="breadcrumb__current">{{ state.product.name }}</span></nav>
+    <div class="product-header-nav">
+      <nav class="breadcrumb"><RouterLink to="/front/products">Catalogue</RouterLink><span v-if="state.product" class="breadcrumb__sep">/</span><span v-if="state.product" class="breadcrumb__current">{{ state.product.name }}</span></nav>
+      <div class="cart-actions-nav">
+        <RouterLink to="/front/cart" class="button button--primary button--small">
+          Voir le panier <span v-if="cartItemCount > 0">({{ cartItemCount }})</span>
+        </RouterLink>
+      </div>
+    </div>
     <div v-if="state.loading" class="page-state card"><p>Chargement du produit...</p></div>
     <div v-else-if="state.error && !state.error.includes('ajouté au panier')" class="page-state card page-state--error"><p>{{ state.error }}</p><RouterLink to="/front/products" class="button button--ghost">Retour au catalogue</RouterLink></div>
     <div v-if="state.error && state.error.includes('ajouté au panier')" class="page-state card page-state--success"><p>✓ {{ state.error }}</p></div>
@@ -121,6 +151,7 @@ onMounted(() => { console.info('[ProductDetail] mounted', { routeParams: route.p
 </template>
 
 <style scoped>
-.product-page{max-width:1280px;margin:0 auto;padding:1rem}.breadcrumb{display:flex;gap:.5rem;margin-bottom:1rem;color:var(--muted);font-size:.92rem}.breadcrumb__sep{opacity:.6}.breadcrumb__current{color:var(--text);font-weight:700}.page-state{display:flex;align-items:center;justify-content:space-between;gap:1rem;min-height:140px}.page-state--error{background:#fff2f2;color:var(--danger)}.page-state--success{background:#eefaf1;color:#18794e}.product-layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(360px,.95fr);gap:1.5rem;align-items:start}.product-layout__content{display:flex;flex-direction:column;gap:1rem}@media (max-width:960px){.product-layout{grid-template-columns:1fr}.product-layout__content{order:2}}
+.product-page{max-width:1280px;margin:0 auto;padding:1rem}.breadcrumb{display:flex;gap:.5rem;color:var(--muted);font-size:.92rem;align-items:center}.breadcrumb__sep{opacity:.6}.breadcrumb__current{color:var(--text);font-weight:700}.page-state{display:flex;align-items:center;justify-content:space-between;gap:1rem;min-height:140px}.page-state--error{background:#fff2f2;color:var(--danger)}.page-state--success{background:#eefaf1;color:#18794e}.product-layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(360px,.95fr);gap:1.5rem;align-items:start}.product-layout__content{display:flex;flex-direction:column;gap:1rem}
+.product-header-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+@media (max-width:960px){.product-layout{grid-template-columns:1fr}.product-layout__content{order:2}}
 </style>
-

@@ -1,9 +1,22 @@
 <script setup>
+import { reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCart } from '@/api/useCart'
+import { createOrder, createCart as createPrestaCart, validateCheckoutData } from '@/api/useCheckout'
+import { useCustomer } from '@/api/customerIdentity'
 
 const router = useRouter()
 const { items, totalPrice, removeItem, updateQuantity, clearCart } = useCart()
+const { customer, loadCustomer } = useCustomer()
+
+const state = reactive({
+  loading: false,
+  error: '',
+  success: false,
+  orderId: null,
+  step: 'cart', // 'cart', 'summary', 'confirmation'
+  paymentMethod: 'cod', // 'cod' for Cash on Delivery
+})
 
 const handleQuantityChange = (identifier, newQty) => {
   if (newQty <= 0) {
@@ -15,76 +28,149 @@ const handleQuantityChange = (identifier, newQty) => {
 
 const proceedToCheckout = () => {
   if (items.value.length === 0) {
-    alert('Votre panier est vide')
+    state.error = 'Votre panier est vide'
     return
   }
-  router.push({ name: 'front-checkout' })
+  state.step = 'summary'
+}
+
+const placeOrder = async () => {
+  state.loading = true
+  state.error = ''
+  state.success = false
+
+  try {
+    // Ensure customer is loaded
+    if (!customer.value) {
+      await loadCustomer()
+    }
+    if (!customer.value) {
+      throw new Error('Client non identifié. Veuillez vous connecter.')
+    }
+
+    const checkoutData = {
+      customerId: customer.value.id,
+      addressId: customer.value.addressId || 1, // Fallback to a default address if needed
+      items: items.value,
+      paymentModule: 'ps_checkpayment', // Example module for COD
+    }
+
+    const { isValid, errors } = await validateCheckoutData(checkoutData)
+    if (!isValid) {
+      throw new Error(errors.join(', '))
+    }
+
+    // Create cart in PrestaShop first
+    const cartId = await createPrestaCart({
+      customerId: checkoutData.customerId,
+      items: checkoutData.items
+    })
+
+    checkoutData.cartId = cartId;
+
+    const result = await createOrder(checkoutData)
+    if (result.success) {
+      state.success = true
+      state.orderId = result.orderId
+      state.step = 'confirmation'
+      clearCart()
+    } else {
+      throw new Error(result.message || 'Une erreur est survenue lors de la création de la commande.')
+    }
+  } catch (error) {
+    state.error = error.message
+  } finally {
+    state.loading = false
+  }
+}
+
+const backToCart = () => {
+  state.step = 'cart'
 }
 </script>
 
 <template>
   <section class="cart-view">
-    <header class="cart-header">
-      <h2>Votre Panier</h2>
-      <button v-if="items.length > 0" class="button button--ghost button--small" @click="clearCart">
-        Vider le panier
-      </button>
-    </header>
+    <!-- Step: Cart -->
+    <div v-if="state.step === 'cart'">
+      <header class="cart-header">
+        <h2>Votre Panier</h2>
+        <button v-if="items.length > 0" class="button button--ghost button--small" @click="clearCart">
+          Vider le panier
+        </button>
+      </header>
 
-    <!-- Empty State -->
-    <div v-if="items.length === 0" class="empty-cart">
-      <p class="muted">Votre panier est vide.</p>
-      <RouterLink to="/front/products" class="button button--ghost">
-        Continuer vos achats
-      </RouterLink>
-    </div>
-
-    <!-- Cart Items -->
-    <div v-else>
-      <div class="cart-items">
-        <div v-for="item in items" :key="item.itemKey || item.id" class="cart-item">
-          <!-- Product Image -->
-          <div class="cart-item__image">
-            <img :src="item.imageUrl" :alt="item.name" />
-          </div>
-
-          <!-- Product Info -->
-          <div class="cart-item__info">
-            <h4 class="cart-item__name">{{ item.name }}</h4>
-            <p v-if="item.variantLabel" class="cart-item__variant muted">{{ item.variantLabel }}</p>
-            <p class="cart-item__price">{{ parseFloat(item.price).toFixed(2) }}€</p>
-          </div>
-
-          <!-- Quantity Control -->
-          <div class="cart-item__quantity">
-            <label :for="`qty-${item.itemKey || item.id}`" class="sr-only">Quantité</label>
-            <input
-              :id="`qty-${item.itemKey || item.id}`"
-              :value="item.quantity"
-              type="number"
-              min="1"
-              @change="(e) => handleQuantityChange(item.itemKey || item.id, parseInt(e.target.value))"
-              class="quantity-input"
-            />
-          </div>
-
-          <!-- Item Total -->
-          <div class="cart-item__total">
-            {{ (item.price * item.quantity).toFixed(2) }}€
-          </div>
-
-          <!-- Remove Button -->
-          <button
-            class="button button--ghost button--small"
-            @click="removeItem(item.itemKey || item.id)"
-            title="Supprimer du panier"
-          >
-            ✕
-          </button>
-        </div>
+      <div v-if="items.length === 0" class="empty-cart">
+        <p class="muted">Votre panier est vide.</p>
+        <RouterLink to="/front/products" class="button button--ghost">
+          Continuer vos achats
+        </RouterLink>
       </div>
 
-      <!-- Cart Summary -->
+      <div v-else>
+        <div class="cart-items">
+          <div v-for="item in items" :key="item.itemKey || item.id" class="cart-item">
+            <div class="cart-item__image">
+              <img :src="item.imageUrl" :alt="item.name" />
+            </div>
+            <div class="cart-item__info">
+              <h4 class="cart-item__name">{{ item.name }}</h4>
+              <p v-if="item.variantLabel" class="cart-item__variant muted">{{ item.variantLabel }}</p>
+              <p class="cart-item__price">{{ parseFloat(item.price).toFixed(2) }}€</p>
+            </div>
+            <div class="cart-item__quantity">
+              <label :for="`qty-${item.itemKey || item.id}`" class="sr-only">Quantité</label>
+              <input
+                :id="`qty-${item.itemKey || item.id}`"
+                :value="item.quantity"
+                type="number"
+                min="1"
+                @change="(e) => handleQuantityChange(item.itemKey || item.id, parseInt(e.target.value))"
+                class="quantity-input"
+              />
+            </div>
+            <div class="cart-item__total">
+              {{ (item.price * item.quantity).toFixed(2) }}€
+            </div>
+            <button
+              class="button button--ghost button--small"
+              @click="removeItem(item.itemKey || item.id)"
+              title="Supprimer du panier"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+        <div class="cart-summary">
+          <div class="summary-row">
+            <span>Sous-total :</span>
+            <strong>{{ totalPrice }}€</strong>
+          </div>
+          <div class="summary-row">
+            <span>Frais de livraison :</span>
+            <strong>Gratuit</strong>
+          </div>
+          <div class="summary-row summary-row--total">
+            <span>Total :</span>
+            <strong>{{ totalPrice }}€</strong>
+          </div>
+          <div class="cart-actions">
+            <RouterLink to="/front/products" class="button button--ghost">
+              Continuer vos achats
+            </RouterLink>
+            <button class="button button--primary" @click="proceedToCheckout">
+              Procéder au paiement
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step: Summary -->
+    <div v-if="state.step === 'summary'">
+      <header class="cart-header">
+        <h2>Récapitulatif de la commande</h2>
+      </header>
       <div class="cart-summary">
         <div class="summary-row">
           <span>Sous-total :</span>
@@ -98,16 +184,35 @@ const proceedToCheckout = () => {
           <span>Total :</span>
           <strong>{{ totalPrice }}€</strong>
         </div>
-
-        <!-- Actions -->
+        <div class="payment-selection">
+          <h4>Méthode de paiement</h4>
+          <label>
+            <input type="radio" v-model="state.paymentMethod" value="cod" checked>
+            Paiement à la livraison
+          </label>
+        </div>
+        <div v-if="state.error" class="error-block">
+          <p>{{ state.error }}</p>
+        </div>
         <div class="cart-actions">
-          <RouterLink to="/front/products" class="button button--ghost">
-            Continuer vos achats
-          </RouterLink>
-          <button class="button button--primary" @click="proceedToCheckout">
-            Procéder au paiement
+          <button class="button button--ghost" @click="backToCart">Retour au panier</button>
+          <button class="button button--primary" @click="placeOrder" :disabled="state.loading">
+            {{ state.loading ? 'Validation...' : 'Valider la commande' }}
           </button>
         </div>
+      </div>
+    </div>
+
+    <!-- Step: Confirmation -->
+    <div v-if="state.step === 'confirmation'">
+      <header class="cart-header">
+        <h2>Commande validée !</h2>
+      </header>
+      <div class="success-block">
+        <p>Votre commande n°{{ state.orderId }} a été enregistrée avec succès.</p>
+        <RouterLink to="/front/orders" class="button button--primary">
+          Voir mes commandes
+        </RouterLink>
       </div>
     </div>
   </section>
@@ -281,6 +386,31 @@ const proceedToCheckout = () => {
   border-width: 0;
 }
 
+.payment-selection {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+.error-block, .success-block {
+  padding: 1rem;
+  margin: 1rem 0;
+  border-radius: 6px;
+}
+
+.error-block {
+  background: #fee;
+  border: 1px solid #fcc;
+  color: var(--danger);
+}
+
+.success-block {
+  background: #e9f7ef;
+  border: 1px solid #b8e9c5;
+  color: #18794e;
+  text-align: center;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .cart-item {
@@ -346,4 +476,3 @@ const proceedToCheckout = () => {
   }
 }
 </style>
-

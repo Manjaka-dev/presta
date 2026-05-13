@@ -169,24 +169,28 @@ const addToCart = (product) => {
     return
   }
 
-  addItem(product, numQty)
+  try {
+    addItem(product, numQty, product.quantity)
 
-  // Reset quantity input
-  quantities[product.id] = 1
+    // Reset quantity input
+    quantities[product.id] = 1
 
-  // Feedback visuel
-  state.error = `${product.name} ajouté au panier (×${numQty})`
-  setTimeout(() => {
-    if (state.error.includes('ajouté au panier')) {
-      state.error = ''
-    }
-  }, 2000)
+    // Feedback visuel
+    state.error = `${product.name} ajouté au panier (×${numQty})`
+    setTimeout(() => {
+      if (state.error.includes('ajouté au panier')) {
+        state.error = ''
+      }
+    }, 2000)
 
-  console.info('[ProductCatalog] item added to cart', {
-    product: product.name,
-    quantity: numQty,
-    cartTotal: cartItemCount.value,
-  })
+    console.info('[ProductCatalog] item added to cart', {
+      product: product.name,
+      quantity: numQty,
+      cartTotal: cartItemCount.value,
+    })
+  } catch (error) {
+    state.error = error.message
+  }
 }
 
 const handleImageError = (event) => {
@@ -600,8 +604,3 @@ loadProducts()
   }
 }
 </style>
-
-
-
-
-

@@ -6,7 +6,7 @@ import { resourceApi } from '@/api/resources'
  * @returns {string} XML payload
  */
 const buildCartXml = (cartData) => {
-  const { customerId, idLang = 1, idCurrency = 1, items } = cartData
+  const { customerId, addressId = 1, idLang = 1, idCurrency = 1, items } = cartData
 
   if (!customerId || items.length === 0) {
     throw new Error('Données de panier incomplètes')
@@ -28,6 +28,8 @@ const buildCartXml = (cartData) => {
   <cart>
     <id_currency>${idCurrency}</id_currency>
     <id_customer>${customerId}</id_customer>
+    <id_address_delivery>${addressId}</id_address_delivery>
+    <id_address_invoice>${addressId}</id_address_invoice>
     <id_lang>${idLang}</id_lang>
     <associations>
       <cart_rows>${associationsXml}
@@ -48,6 +50,7 @@ export const createCart = async (cartData) => {
   try {
     const xml = buildCartXml({
       customerId: cartData.customerId,
+      addressId: cartData.addressId || 1,
       items: cartData.items,
     })
 
@@ -58,7 +61,7 @@ export const createCart = async (cartData) => {
 
     let cartId = null
     if (response && typeof response === 'string') {
-      const match = response.match(/id["\s:=]+(\d+)/i)
+      const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i) || response.match(/id["\s:=]+(\d+)/i)
       cartId = match ? parseInt(match[1]) : null
     }
 
@@ -145,9 +148,9 @@ export const getOrderStatus = async (orderId) => {
 /**
  * Valide les données nécessaires avant création
  * @param {Object} checkoutData - Données du checkout
- * @returns {Object} Résultat de validation { isValid, errors[] }
+ * @returns {Promise<Object>} Résultat de validation { isValid, errors[] }
  */
-export const validateCheckoutData = (checkoutData) => {
+export const validateCheckoutData = async (checkoutData) => {
   const errors = []
 
   if (!checkoutData.customerId || checkoutData.customerId <= 0) {
@@ -160,14 +163,64 @@ export const validateCheckoutData = (checkoutData) => {
 
   if (!checkoutData.items || checkoutData.items.length === 0) {
     errors.push('Panier vide')
-  }
+  } else {
+    // Vérification des stocks serveur
+    try {
+        const stockApi = resourceApi('stock_availables')
+        const stockResponse = await stockApi.list({
+          display: '[id_product,id_product_attribute,quantity]',
+          limit: 1000,
+        })
+        
+        let stocks = []
+        if (Array.isArray(stockResponse)) {
+            stocks = stockResponse
+        } else if (stockResponse.stock_availables && Array.isArray(stockResponse.stock_availables)) {
+            stocks = stockResponse.stock_availables
+        } else if (stockResponse.prestashop?.stock_availables) {
+            const stocksData = stockResponse.prestashop.stock_availables.stock_available
+            stocks = Array.isArray(stocksData) ? stocksData : stocksData ? [stocksData] : []
+        }
 
-  if (checkoutData.items && checkoutData.items.length > 0) {
-    checkoutData.items.forEach((item, idx) => {
-      if (!item.id || item.id <= 0) errors.push(`Article ${idx + 1} : ID produit invalide`)
-      if (!item.quantity || item.quantity <= 0) errors.push(`Article ${idx + 1} : Quantité invalide`)
-      if (!item.price || item.price < 0) errors.push(`Article ${idx + 1} : Prix invalide`)
-    })
+        checkoutData.items.forEach((item, idx) => {
+          if (!item.id || item.id <= 0) {
+             errors.push(`Article ${idx + 1} : ID produit invalide`)
+             return
+          }
+          if (!item.quantity || item.quantity <= 0) {
+              errors.push(`Article ${idx + 1} : Quantité invalide`)
+              return
+          }
+          if (!item.price || item.price < 0) {
+              errors.push(`Article ${idx + 1} : Prix invalide`)
+              return
+          }
+          
+          // Vérification du stock
+          const itemCombinationId = item.combinationId ? parseInt(item.combinationId) : 0
+          const itemStockEntries = stocks.filter(s => parseInt(s.id_product) === parseInt(item.id))
+          
+          let availableQty = 0
+          
+          if (itemStockEntries.length > 0) {
+              // Si le produit a des combinaisons
+              if (itemCombinationId > 0) {
+                 const comboStock = itemStockEntries.find(s => parseInt(s.id_product_attribute) === itemCombinationId)
+                 if (comboStock) availableQty = parseInt(comboStock.quantity || 0)
+              } else {
+                  // Total pour un produit sans combinaison
+                  availableQty = itemStockEntries.reduce((sum, s) => sum + parseInt(s.quantity || 0), 0)
+              }
+          }
+          
+          if (item.quantity > availableQty) {
+              errors.push(`Stock insuffisant pour l'article ${item.name}. (Demandé: ${item.quantity}, Disponible: ${availableQty})`)
+          }
+        })
+    } catch (e) {
+       console.error('[useCheckout] Erreur lors de la vérification des stocks', e)
+       errors.push("Impossible de vérifier la disponibilité des stocks.")
+    }
   }
 
   return {
@@ -230,6 +283,7 @@ const buildOrderXml = (orderData) => {
     <total_paid_real>${totalPaidReal}</total_paid_real>
     <total_products>${totalProducts.toFixed(2)}</total_products>
     <total_products_wt>${totalProductsWt}</total_products_wt>
+    <conversion_rate>1</conversion_rate>
     <associations>
       <order_rows>${associationsXml}
       </order_rows>
@@ -278,7 +332,7 @@ export const createOrder = async (checkoutData) => {
     let orderId = null
     if (response && typeof response === 'string') {
       // Essayer d'extraire l'ID du texte de réponse
-      const match = response.match(/id["\s:=]+(\d+)/i)
+      const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i) || response.match(/id["\s:=]+(\d+)/i)
       orderId = match ? parseInt(match[1]) : null
     }
 

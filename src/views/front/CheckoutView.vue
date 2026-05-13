@@ -53,10 +53,18 @@ const prevStep = () => {
 const submitOrder = async () => {
   state.loading = true; state.error = ''
   try {
+    // Créer le panier d'abord
+    const cartId = await createCart({
+      customerId: parseInt(state.customerId),
+      addressId: parseInt(state.selectedAddressId),
+      items: cartItems.value.map(item => ({ id: item.id, combinationId: item.combinationId, name: item.name, price: item.price, quantity: item.quantity })),
+    })
+
     state.orderCreated = await createOrder({
       customerId: parseInt(state.customerId),
       addressId: parseInt(state.selectedAddressId),
       paymentModule: state.paymentModule,
+      cartId: cartId,
       items: cartItems.value.map(item => ({ id: item.id, combinationId: item.combinationId, name: item.name, price: item.price, quantity: item.quantity })),
     })
     state.currentStep = STEPS.SUCCESS; clearCart()

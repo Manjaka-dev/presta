@@ -22,7 +22,7 @@ const buildRelativeUrl = (baseUrl, endpoint, params = {}) => {
     searchParams.set(key, value)
   })
 
-  const query = searchParams.toString()
+  const query = searchParams.toString().replace(/%5B/gi, '[').replace(/%5D/gi, ']').replace(/%2C/gi, ',')
   return query ? `${path}?${query}` : path
 }
 
@@ -52,7 +52,7 @@ const buildUrl = (endpoint, params = {}) => {
       url.searchParams.set(key, value)
     })
 
-    return url.toString()
+    return url.toString().replace(/%5B/gi, '[').replace(/%5D/gi, ']').replace(/%2C/gi, ',')
   }
 
   return buildRelativeUrl(normalizedBase, endpoint, params)

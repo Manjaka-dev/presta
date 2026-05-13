@@ -18,14 +18,23 @@ const extractItems = (payload, resource) => {
 
   const preferredKeys = [resource?.endpoint, resource?.key]
   for (const key of preferredKeys) {
-    if (key && Array.isArray(data[key])) {
-      return data[key]
+    if (key && data[key]) {
+      return Array.isArray(data[key]) ? data[key] : [data[key]]
     }
   }
 
   const firstArray = Object.values(data).find((value) => Array.isArray(value))
   if (firstArray) {
     return firstArray
+  }
+  
+  // Si c'est un objet racine unique (rare mais possible)
+  if (typeof data === 'object' && Object.keys(data).length > 0) {
+    const firstObj = Object.values(data)[0]
+    if (typeof firstObj === 'object') {
+       return [firstObj]
+    }
+    return [data]
   }
 
   return []
