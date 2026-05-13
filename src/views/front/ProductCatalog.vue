@@ -3,6 +3,7 @@ import { reactive } from 'vue'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
 import { useCart } from '@/api/useCart'
+import { getProductImageUrl } from '@/api/httpClient'
 
 const state = reactive({
   loading: true,
@@ -22,15 +23,6 @@ const STOCK_STATUS = {
 
 const LOW_STOCK_THRESHOLD = 5
 
-const getProductImageUrl = (productId, defaultImageId) => {
-  if (!defaultImageId) {
-    return '/images/placeholder-product.png'
-  }
-  // Format du lien image PrestaShop : /api/images/products/{product_id}/{image_id}
-  // Mais pour l'affichage, on utilise l'URL directe du store
-  const apiBase = import.meta.env.VITE_API_BASE || window.location.origin
-  return `${apiBase}/img/p/${defaultImageId}/${defaultImageId}.jpg`
-}
 
 const getStockStatus = (quantity) => {
   if (quantity <= 0) return STOCK_STATUS.OUT_OF_STOCK
@@ -130,7 +122,7 @@ const loadProducts = async () => {
           price: normalizePrice(product.price),
           quantity: quantity,
           defaultImageId: product.id_default_image,
-          imageUrl: getProductImageUrl(productId, product.id_default_image),
+          imageUrl: product.id_default_image ? getProductImageUrl(productId, product.id_default_image) : '/images/placeholder-product.png',
           stockStatus: getStockStatus(quantity),
           active: product.active,
         }

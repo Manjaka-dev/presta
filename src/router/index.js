@@ -11,6 +11,7 @@ import CheckoutView from '../views/front/CheckoutView.vue'
 import BackOfficeHome from '../views/back/BackOfficeHome.vue'
 import ResetFront from '../components/backoffice/reset/ResetFront.vue'
 import OrdersBackoffice from '../components/backoffice/orders/OrdersBackoffice.vue'
+import DataImportView from '../views/back/DataImportView.vue'
 import { legacyAdminRoute } from '../experience'
 
 const router = createRouter({
@@ -70,6 +71,11 @@ const router = createRouter({
       path: '/back/orders',
       name: 'back-orders',
       component: OrdersBackoffice,
+    },
+    {
+      path: '/back/import',
+      name: 'back-import',
+      component: DataImportView,
     },
     {
       path: '/admin',

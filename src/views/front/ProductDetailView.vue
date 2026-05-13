@@ -1,9 +1,10 @@
 <script setup>
-import { reactive, computed, onMounted } from 'vue'
+import { reactive, computed, onMounted, nextTick } from 'vue'
 import { useRoute, RouterLink } from 'vue-router'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
 import { useCart } from '@/api/useCart'
+import { getProductImageUrl } from '@/api/httpClient'
 import ProductMediaGallery from '@/components/front/product/ProductMediaGallery.vue'
 import ProductMetaPanel from '@/components/front/product/ProductMetaPanel.vue'
 import ProductVariantSelector from '@/components/front/product/ProductVariantSelector.vue'
@@ -15,7 +16,7 @@ const view = reactive({ activeImageIndex: 0, quantity: 1, selectedVariants: {} }
 const toArray = (v) => Array.isArray(v) ? v : v ? [v] : []
 const normalize = (v) => typeof v === 'string' ? v : Array.isArray(v) ? (v[0] || '') : (v && typeof v === 'object' ? String(Object.values(v)[0] || '') : '')
 const extractSingleItem = (payload, resource) => { if (!payload || payload.__raw) return null; const d = payload.prestashop || payload; if (Array.isArray(d)) return d[0] || null; for (const k of [resource?.endpoint, resource?.key, 'product', 'products']) { const x = d?.[k]; if (Array.isArray(x)) return x[0] || null; if (x && typeof x === 'object') return x } const a = Object.values(d || {}).find((x) => Array.isArray(x)); return a ? a[0] || null : (d && typeof d === 'object' && 'id' in d ? d : null) }
-const imgUrl = (id) => id ? `${import.meta.env.VITE_API_BASE || window.location.origin}/img/p/${id}/${id}.jpg` : '/images/placeholder-product.png'
+const imgUrl = (id) => id ? getProductImageUrl(productId, id) : '/images/placeholder-product.png'
 const colorMap = { noir: '#111827', black: '#111827', blanc: '#fff', white: '#fff', gris: '#6b7280', gray: '#6b7280', rouge: '#ef4444', red: '#ef4444', bleu: '#3b82f6', blue: '#3b82f6', vert: '#10b981', green: '#10b981', jaune: '#f59e0b', yellow: '#f59e0b', orange: '#f97316', rose: '#ec4899', pink: '#ec4899', violet: '#8b5cf6', purple: '#8b5cf6', marron: '#92400e', brown: '#92400e', beige: '#d6b38a', marine: '#1d4ed8' }
 const resolveColor = (n='') => colorMap[String(n).trim().toLowerCase()] || `hsl(${Math.abs([...String(n)].reduce((a,c)=>a+c.charCodeAt(0),0))%360} 72% 55%)`
 const isColor = (l='') => /color|couleur|colour|teinte/i.test(l)
@@ -75,7 +76,24 @@ const groups = computed(() => {
   return [...map.values()].map(g => ({ ...g, options: [...g.options.values()].map(o => ({ ...o, available: state.combinations.some(c => parseInt(c.quantity || 0) > 0 && comboMap(c)[g.id] === o.id && Object.entries(view.selectedVariants).every(([sg, so]) => !so || sg === g.id || comboMap(c)[String(sg)] === String(so))) })) }))
 })
 
-const selectVariant = ({ groupId, optionId }) => { view.selectedVariants[String(groupId)] = String(optionId); view.activeImageIndex = 0 }
+const selectVariant = async ({ groupId, optionId }) => { 
+  view.selectedVariants[String(groupId)] = String(optionId)
+  await nextTick()
+  const combination = selectedCombination.value
+  
+  if (combination && combination.imageId) {
+    const idx = state.images.findIndex(img => String(img.id) === String(combination.imageId))
+    if (idx !== -1) {
+      view.activeImageIndex = idx
+    } else {
+      const newImg = { id: combination.imageId, url: imgUrl(combination.imageId) }
+      state.images.push(newImg)
+      view.activeImageIndex = state.images.length - 1
+    }
+  } else {
+    view.activeImageIndex = 0 
+  }
+}
 const seed = () => { const c = state.combinations.find(x => x.quantity > 0) || state.combinations[0]; if (c) c.attributes.forEach(a => { if (!view.selectedVariants[String(a.groupId)]) view.selectedVariants[String(a.groupId)] = String(a.id) }) }
 
 const add = () => {
@@ -116,7 +134,19 @@ const load = async () => {
     try { const cApi = resourceApi('categories'); const cR = await cApi.list({ display: '[id,name]', limit: 500 }); const cats = extractItems(cR, cApi.resource); const ids = toArray(p.associations?.categories?.category).map(c => parseInt(c.id || c)).filter(Boolean); state.categories = cats.filter(c => ids.length === 0 || ids.includes(parseInt(c.id))).map(c => ({ id: c.id, name: normalize(c.name) })); console.info('[ProductDetail] categories parsed', { totalEntries: cats.length, selectedIds: ids, productCategories: state.categories.length }) } catch (e) { console.warn('[ProductDetail] Could not load categories', e) }
     const gApi = resourceApi('product_options'); const vApi = resourceApi('product_option_values'); const [gR, vR] = await Promise.all([gApi.list({ display: '[id,name]', limit: 500 }), vApi.list({ display: '[id,id_attribute_group,name]', limit: 1000 })]); const gItems = extractItems(gR, gApi.resource); const vItems = extractItems(vR, vApi.resource); const gMap = Object.fromEntries(gItems.map(g => [parseInt(g.id), normalize(g.name)])); const vMap = Object.fromEntries(vItems.map(v => [parseInt(v.id), { name: normalize(v.name), groupId: parseInt(v.id_attribute_group) }])); console.info('[ProductDetail] option maps loaded', { groups: gItems.length, values: vItems.length })
     const combApi = resourceApi('combinations'); const combR = await combApi.list({ display: 'full', limit: 1000 }); const combs = extractItems(combR, combApi.resource).filter(c => parseInt(c.id_product) === productId); const sR = await stockApi.list({ display: '[id_product,id_product_attribute,quantity]', limit: 1000 }); const sItems = extractItems(sR, stockApi.resource); const sMap = Object.fromEntries(sItems.filter(s => parseInt(s.id_product) === productId).map(s => [parseInt(s.id_product_attribute), parseInt(s.quantity || 0)]))
-    state.combinations = combs.map(c => { const ids = extractCombinationOptionIds(c); const attrs = ids.map(id => { const v = vMap[id]; return { id, groupId: v?.groupId || 0, group: v ? gMap[v.groupId] : 'Option', name: v?.name || `#${id}` } }); console.info('[ProductDetail] combination parsed', { combinationId: c.id, optionIds: ids, attributes: attrs.length }); return { id: c.id, reference: c.reference, price: parseFloat(c.price || 0), quantity: sMap[parseInt(c.id)] || 0, attributes: attrs } }); console.info('[ProductDetail] combinations loaded', { totalEntries: combs.length, productCombinations: state.combinations.length }); seed()
+    state.combinations = combs.map(c => { 
+      const ids = extractCombinationOptionIds(c); 
+      const attrs = ids.map(id => { const v = vMap[id]; return { id, groupId: v?.groupId || 0, group: v ? gMap[v.groupId] : 'Option', name: v?.name || `#${id}` } }); 
+      let imageId = null;
+      const imagesData = c.associations?.images;
+      if (imagesData) {
+        const imgList = Array.isArray(imagesData) ? imagesData : (imagesData.image ? (Array.isArray(imagesData.image) ? imagesData.image : [imagesData.image]) : []);
+        if (imgList.length && imgList[0].id) imageId = imgList[0].id;
+      }
+      console.info('[ProductDetail] combination parsed', { combinationId: c.id, optionIds: ids, attributes: attrs.length, imageId }); 
+      return { id: c.id, reference: c.reference, price: parseFloat(c.price || 0), quantity: sMap[parseInt(c.id)] || 0, attributes: attrs, imageId } 
+    }); 
+    console.info('[ProductDetail] combinations loaded', { totalEntries: combs.length, productCombinations: state.combinations.length }); seed()
     if (!state.images.length && state.product.defaultImageId) state.images = [{ id: state.product.defaultImageId, url: imgUrl(state.product.defaultImageId) }]
     console.info('[ProductDetail] loaded', { productId, name: state.product.name })
   } catch (e) { state.error = e instanceof Error ? e.message : String(e); console.error('[ProductDetail] error', e) }

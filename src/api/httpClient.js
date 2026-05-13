@@ -139,4 +139,39 @@ const requestXml = async (method, endpoint, xmlBody, params = {}) => {
   })
 }
 
-export { requestRaw, requestJson, requestXml }
+const getProductImageUrl = (productId, imageId) => {
+  const { apiKey } = getConfig()
+  const endpoint = `images/products/${productId}/${imageId}`
+  const params = apiKey ? { ws_key: apiKey } : {}
+  return buildUrl(endpoint, params)
+}
+
+const requestFormData = async (endpoint, formData, params = {}) => {
+  const url = buildUrl(endpoint, params)
+  const headers = buildHeaders()
+  // Do NOT set Content-Type — browser sets it with boundary for multipart
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: formData,
+  })
+
+  const text = await response.text()
+
+  if (!response.ok) {
+    try {
+      console.error('[httpClient] formdata upload failed', { url, status: response.status, body: text })
+    } catch (e) {
+      // ignore
+    }
+    const err = new Error(text || `Upload failed with status ${response.status}`)
+    err.status = response.status
+    err.body = text
+    throw err
+  }
+
+  return text
+}
+
+export { requestRaw, requestJson, requestXml, requestFormData, getProductImageUrl, buildUrl, buildHeaders }
