@@ -1,8 +1,8 @@
 <script setup>
-import { reactive } from 'vue'
+import { reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCart } from '@/api/useCart'
-import { createCart, createOrder, getCartStatus, getOrderStatus, validateCheckoutData, getCustomerAddresses } from '@/api/useCheckout'
+import { createCart, createOrder, getCartStatus, getOrderStatus, validateCheckoutData, getCustomerAddresses, calculateCartTaxes } from '@/api/useCheckout'
 
 const router = useRouter()
 const { items: cartItems, totalPrice, removeItem, updateQuantity, clearCart } = useCart()
@@ -18,6 +18,8 @@ const state = reactive({
   addresses: [],
   selectedAddressId: null,
   orderCreated: null,
+  cartId: null,
+  taxAmount: 0,
 })
 
 const handleQuantityChange = (identifier, newQty) => {
@@ -34,6 +36,28 @@ const goToStep = async (step) => {
     } catch (e) { state.selectedAddressId = 1; state.addresses = [{ id: 1, firstname: 'Test', lastname: 'User', address1: 'Adresse défaut' }] }
     finally { state.loading = false }
   }
+
+  if (step === STEPS.CONFIRM) {
+    state.loading = true
+    try {
+      // Calcul des taxes
+      const { totalTaxAmount } = await calculateCartTaxes(cartItems.value)
+      state.taxAmount = totalTaxAmount
+
+      // Création du panier (abandonné si non validé)
+      state.cartId = await createCart({
+        customerId: parseInt(state.customerId),
+        addressId: parseInt(state.selectedAddressId),
+        items: cartItems.value.map(item => ({ id: item.id, combinationId: item.combinationId, name: item.name, price: item.price, quantity: item.quantity, id_tax_rules_group: item.id_tax_rules_group })),
+      })
+    } catch (e) {
+      state.error = "Erreur lors de la préparation de la commande : " + e.message
+      state.loading = false
+      return // On bloque si erreur
+    }
+    state.loading = false
+  }
+
   state.currentStep = step
   state.error = ''
 }
@@ -53,18 +77,11 @@ const prevStep = () => {
 const submitOrder = async () => {
   state.loading = true; state.error = ''
   try {
-    // Créer le panier d'abord
-    const cartId = await createCart({
-      customerId: parseInt(state.customerId),
-      addressId: parseInt(state.selectedAddressId),
-      items: cartItems.value.map(item => ({ id: item.id, combinationId: item.combinationId, name: item.name, price: item.price, quantity: item.quantity })),
-    })
-
     state.orderCreated = await createOrder({
       customerId: parseInt(state.customerId),
       addressId: parseInt(state.selectedAddressId),
       paymentModule: state.paymentModule,
-      cartId: cartId,
+      cartId: state.cartId,
       items: cartItems.value.map(item => ({ id: item.id, combinationId: item.combinationId, name: item.name, price: item.price, quantity: item.quantity })),
     })
     state.currentStep = STEPS.SUCCESS; clearCart()
@@ -72,6 +89,10 @@ const submitOrder = async () => {
   } catch (error) { state.error = error instanceof Error ? error.message : String(error) }
   finally { state.loading = false }
 }
+
+const totalPriceTtc = computed(() => {
+  return (parseFloat(totalPrice.value) + state.taxAmount).toFixed(2)
+})
 </script>
 
 <template>
@@ -147,11 +168,15 @@ const submitOrder = async () => {
               <div class="price">{{ (item.price * item.quantity).toFixed(2) }}€</div>
             </div>
           </div>
-          <div class="summary"><div><span>Total TTC :</span><strong>{{ totalPrice }}€</strong></div></div>
+          <div class="summary">
+            <div><span>Sous-total HT :</span><strong>{{ totalPrice }}€</strong></div>
+            <div class="tax-row"><span>Taxes :</span><strong>{{ state.taxAmount.toFixed(2) }}€</strong></div>
+            <div class="total-row"><span>Total TTC :</span><strong>{{ totalPriceTtc }}€</strong></div>
+          </div>
         </div>
         <div class="actions">
-          <button class="button button--ghost" @click="prevStep">← Modifier</button>
-          <button class="button button--primary" @click="submitOrder">Créer</button>
+          <button class="button button--ghost" @click="prevStep">← Modifier (Panier enregistré)</button>
+          <button class="button button--primary" @click="submitOrder">Créer la commande</button>
         </div>
       </div>
 

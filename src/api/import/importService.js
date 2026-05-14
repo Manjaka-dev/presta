@@ -12,6 +12,7 @@ import { createProductOptionValue, findProductOptionValueIdByName } from './prod
 import { createCombinationForProduct, findCombinationByProductAndValueId } from './combinationsService'
 import { buildOrderConfig, createOrderFromCsvRow, validateOrderConfig } from './commandeService'
 import { slugify, toFloat, toInt, formatMoney } from '@/utils/stringUtils'
+import { ensureTaxSystem } from './taxesService'
 
 /**
  * Point d'entrée principal
@@ -61,14 +62,37 @@ async function importProducts(rows, progress) {
     const categoryId = await ensureCategoryId(categoryName)
     const availableDate = toIsoDate(row.date_availability_produit || row.date_produit || row.date)
 
+    // Gestion des taxes
+    let taxRulesGroupId = 0
+    let taxRate = 0
+    const taxCol = row.taxe || row.Taxe || row.tva || row.TVA || ''
+    if (taxCol) {
+      try {
+        const countryId = toInt(import.meta.env.VITE_DEFAULT_COUNTRY_ID || '8', 8)
+        const taxSystem = await ensureTaxSystem(taxCol, countryId)
+        if (taxSystem) {
+          taxRulesGroupId = taxSystem.taxRulesGroupId
+          taxRate = taxSystem.rate
+        }
+      } catch (err) {
+        progress(`Ligne ${index + 1}: Erreur création taxe: ${err.message}`)
+      }
+    }
+
+    const prixTtc = toFloat(row.prix_ttc || '0', 0)
+    const priceHt = taxRate > 0 ? prixTtc / (1 + (taxRate / 100)) : prixTtc
+    const wholesalePriceTtc = toFloat(row.prix_achat || '0', 0)
+    const wholesalePriceHt = taxRate > 0 ? wholesalePriceTtc / (1 + (taxRate / 100)) : wholesalePriceTtc
+
     const input = {
       name,
       reference,
-      price: toFloat(row.prix_ttc || '0', 0),
-      wholesalePrice: toFloat(row.prix_achat || '0', 0),
+      price: priceHt,
+      wholesalePrice: wholesalePriceHt,
       categoryId,
       availableDate,
-      linkRewrite: slugify(name)
+      linkRewrite: slugify(name),
+      taxRulesGroupId
     }
 
     try {

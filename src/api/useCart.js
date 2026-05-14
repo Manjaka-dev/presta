@@ -51,6 +51,7 @@ export const useCart = () => {
         maxQuantity: maxQuantity, // Store maxQuantity for future updates
         imageUrl: product.imageUrl,
         variantLabel: product.variantLabel || '',
+        id_tax_rules_group: product.id_tax_rules_group || 0,
       })
     }
     saveCartToStorage(cartState.items)

@@ -405,3 +405,55 @@ export const getCustomerAddresses = async (customerId) => {
     return []
   }
 }
+
+/**
+ * Calcule le montant des taxes pour les items du panier
+ */
+let cachedTaxes = null
+let cachedTaxRules = null
+
+export const calculateCartTaxes = async (items) => {
+  try {
+    if (!cachedTaxes) {
+      const taxesApi = resourceApi('taxes')
+      const tRes = await taxesApi.list({ display: '[id,rate]' })
+      cachedTaxes = Array.isArray(tRes) ? tRes : tRes?.prestashop?.taxes?.tax || []
+      if (!Array.isArray(cachedTaxes)) cachedTaxes = [cachedTaxes]
+    }
+    
+    if (!cachedTaxRules) {
+      const rulesApi = resourceApi('tax_rules')
+      const rRes = await rulesApi.list({ display: '[id_tax_rules_group,id_tax,id_country]' })
+      cachedTaxRules = Array.isArray(rRes) ? rRes : rRes?.prestashop?.tax_rules?.tax_rule || []
+      if (!Array.isArray(cachedTaxRules)) cachedTaxRules = [cachedTaxRules]
+    }
+
+    let totalTaxAmount = 0
+    let itemsWithTax = items.map(item => ({ ...item, taxAmount: 0 }))
+
+    for (let i = 0; i < itemsWithTax.length; i++) {
+      const item = itemsWithTax[i]
+      const groupId = item.id_tax_rules_group
+      if (!groupId || groupId === '0') continue
+
+      // Find the rule for this group (assuming default country or just the first matching tax)
+      // Ideally we filter by countryId, but let's just pick the first rule for this group
+      const rule = cachedTaxRules.find(r => r.id_tax_rules_group === String(groupId) || r.id_tax_rules_group === groupId)
+      if (rule) {
+        const tax = cachedTaxes.find(t => t.id === String(rule.id_tax) || t.id === rule.id_tax)
+        if (tax) {
+          const rate = parseFloat(tax.rate || 0)
+          const itemTax = (item.price * (rate / 100)) * item.quantity
+          item.taxAmount = itemTax
+          totalTaxAmount += itemTax
+        }
+      }
+    }
+
+    return { totalTaxAmount, itemsWithTax }
+  } catch (e) {
+    console.warn('[useCheckout] Could not calculate taxes', e)
+    return { totalTaxAmount: 0, itemsWithTax: items }
+  }
+}
+

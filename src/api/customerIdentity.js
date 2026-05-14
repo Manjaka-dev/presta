@@ -27,9 +27,8 @@ export const useCustomer = () => {
   const customer = ref(null)
 
   const loadCustomer = async () => {
-    // For this mock implementation, we just get the ID from storage
     // In a real app, this would likely fetch customer details from the API
-    const id = getCustomerId() || 2 // Fallback to ID 2 for testing if none found
+    const id = getCustomerId()
     
     if (id) {
        customer.value = {

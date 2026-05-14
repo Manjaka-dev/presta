@@ -56,7 +56,7 @@ const loadProducts = async () => {
   try {
     const api = resourceApi('products')
     const response = await api.list({
-      display: '[id,name,price,id_default_image,active]',
+      display: '[id,name,price,id_default_image,active,id_tax_rules_group]',
       limit: 50,
     })
     const items = extractItems(response, api.resource)

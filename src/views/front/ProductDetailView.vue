@@ -110,7 +110,8 @@ const add = () => {
       name: state.product.name,
       variantLabel: selectionSummary.value,
       price: currentPrice.value,
-      imageUrl: activeImageUrl.value
+      imageUrl: activeImageUrl.value,
+      id_tax_rules_group: state.product.id_tax_rules_group
     }, view.quantity, maxQty);
 
     state.error = `${state.product.name} ajouté au panier !`;
@@ -128,7 +129,7 @@ const load = async () => {
     if (!p) { const lr = await api.list({ display: 'full', limit: 250 }); const items = extractItems(lr, api.resource); p = items.find(i => parseInt(i.id) === productId) || null; console.info('[ProductDetail] product list fallback', { count: items.length, found: Boolean(p) }) }
     if (!p) { state.error = `Produit non trouvé (id=${productId})`; return }
     const stockApi = resourceApi('stock_availables'); const stockR = await stockApi.list({ display: '[id_product,id_product_attribute,quantity]', limit: 500 }); const stocks = extractItems(stockR, stockApi.resource); const ps = stocks.filter(s => parseInt(s.id_product) === productId); const qty = ps.reduce((s, x) => s + parseInt(x.quantity || 0), 0); console.info('[ProductDetail] stock parsed', { totalEntries: stocks.length, productEntries: ps.length, productQuantity: qty })
-    state.product = { id: productId, name: normalize(p.name), description: normalize(p.description), descriptionShort: normalize(p.description_short), price: parseFloat(p.price || 0).toFixed(2), quantity: qty, reference: p.reference, defaultImageId: p.id_default_image }
+    state.product = { id: productId, name: normalize(p.name), description: normalize(p.description), descriptionShort: normalize(p.description_short), price: parseFloat(p.price || 0).toFixed(2), quantity: qty, reference: p.reference, defaultImageId: p.id_default_image, id_tax_rules_group: p.id_tax_rules_group || 0 }
     console.info('[ProductDetail] product data resolved', state.product)
     try { const imgApi = resourceApi('images_products'); const imgR = await imgApi.get(productId); const imgList = extractItems(imgR, imgApi.resource); state.images = imgList.map(i => ({ id: i.id || i.id_image || i, url: imgUrl(i.id || i.id_image || i) })); console.info('[ProductDetail] images parsed', { totalEntries: imgList.length }) } catch (e) { console.warn('[ProductDetail] Could not load images', e) }
     try { const cApi = resourceApi('categories'); const cR = await cApi.list({ display: '[id,name]', limit: 500 }); const cats = extractItems(cR, cApi.resource); const ids = toArray(p.associations?.categories?.category).map(c => parseInt(c.id || c)).filter(Boolean); state.categories = cats.filter(c => ids.length === 0 || ids.includes(parseInt(c.id))).map(c => ({ id: c.id, name: normalize(c.name) })); console.info('[ProductDetail] categories parsed', { totalEntries: cats.length, selectedIds: ids, productCategories: state.categories.length }) } catch (e) { console.warn('[ProductDetail] Could not load categories', e) }

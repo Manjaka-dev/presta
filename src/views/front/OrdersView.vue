@@ -51,7 +51,7 @@ onMounted(() => { if (hasCustomer.value) loadOrders() })
       <RouterLink to="/front/products" class="button button--ghost">Retour boutique</RouterLink>
     </header>
 
-    <div class="card orders-page__toolbar">
+    <!-- <div class="card orders-page__toolbar">
       <label for="customer-id">Identifiant client</label>
       <div class="orders-page__toolbar-row">
         <input id="customer-id" v-model="form.customerId" type="number" min="1" class="orders-page__input" placeholder="Ex: 2" />
@@ -60,7 +60,7 @@ onMounted(() => { if (hasCustomer.value) loadOrders() })
         </button>
       </div>
       <p class="muted small">Sans authentification frontoffice, on utilise un identifiant client stocké localement.</p>
-    </div>
+    </div> -->
 
     <div v-if="state.error" class="card orders-page__state orders-page__state--error">{{ state.error }}</div>
     <div v-else-if="!state.loading && state.orders.length === 0" class="card orders-page__state">Aucune commande à afficher.</div>
