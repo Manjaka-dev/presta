@@ -1,155 +1,242 @@
 import { resourceApi } from '@/api/resources'
+import { extractItems } from '@/utils/resourceData.js'
 
-/**
- * Construit le XML d'un panier PrestaShop
- * @param {Object} cartData - { customerId, cartItems[] }
- * @returns {string} XML payload
- */
-const buildCartXml = (cartData) => {
-  const { customerId, addressId = 1, idLang = 1, idCurrency = 1, items } = cartData
+// --- Fonctions de calcul de taxe ---
 
-  if (!customerId || items.length === 0) {
-    throw new Error('Données de panier incomplètes')
+let cachedTaxes = null
+let cachedTaxRules = null
+
+export const calculateCartTaxes = async (items) => {
+  try {
+    if (!cachedTaxes) {
+      const taxesApi = resourceApi('taxes')
+      const tRes = await taxesApi.list({ display: '[id,rate,name]' })
+      cachedTaxes = extractItems(tRes, taxesApi.resource)
+    }
+    
+    if (!cachedTaxRules) {
+      const rulesApi = resourceApi('tax_rules')
+      const rRes = await rulesApi.list({ display: '[id_tax_rules_group,id_tax]' })
+      cachedTaxRules = extractItems(rRes, rulesApi.resource)
+    }
+
+    let totalTaxAmount = 0
+    const itemsWithTax = items.map(item => {
+      const taxInfo = getTaxInfoForItem(item, cachedTaxRules, cachedTaxes)
+      const itemTax = (parseFloat(item.price) * (taxInfo.rate / 100)) * parseInt(item.quantity)
+      totalTaxAmount += itemTax
+      return { ...item, taxAmount: itemTax, taxRate: taxInfo.rate }
+    })
+
+    return { totalTaxAmount, itemsWithTax }
+  } catch (e) {
+    console.warn('[useCheckout] Could not calculate taxes', e)
+    return { totalTaxAmount: 0, itemsWithTax: items.map(i => ({...i, taxAmount: 0, taxRate: 0})) }
+  }
+}
+
+const getTaxInfoForItem = (item, taxRules, taxes) => {
+  const groupId = item.id_tax_rules_group
+  if (!groupId || groupId === '0' || !taxRules || !taxes) {
+    return { rate: 0, name: 'No Tax' }
   }
 
-  // Construire les lignes du panier
-  let associationsXml = ''
-  items.forEach((item) => {
-    associationsXml += `
-    <cart_row>
-      <id_product>${item.id}</id_product>
-      <id_product_attribute>${item.combinationId || 0}</id_product_attribute>
-      <quantity>${item.quantity}</quantity>
-    </cart_row>`
-  })
+  const taxRule = taxRules.find(tr => String(tr.id_tax_rules_group) === String(groupId))
+  if (!taxRule) {
+    return { rate: 0, name: 'No Rule' }
+  }
 
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<prestashop>
+  const tax = taxes.find(t => String(t.id) === String(taxRule.id_tax))
+  if (tax) {
+    return { rate: parseFloat(tax.rate || 0), name: tax.name || 'Tax' }
+  }
+
+  return { rate: 0, name: 'Tax not found' }
+}
+
+// --- Fonctions de création de Panier et Commande ---
+
+const buildCartXml = (cartData) => {
+  const { id, customerId, addressId = 1, idLang = 1, idCurrency = 1, items = [] } = cartData
+  if (!customerId) throw new Error('customerId is required for cart')
+
+  let associationsXml = ''
+  if (items.length > 0) {
+    associationsXml = `
+    <associations>
+      <cart_rows>
+        ${items.map(item => `
+        <cart_row>
+          <id_product>${item.id}</id_product>
+          <id_product_attribute>${item.combinationId || 0}</id_product_attribute>
+          <id_address_delivery>${addressId}</id_address_delivery>
+          <id_customization>0</id_customization>
+          <quantity>${item.quantity}</quantity>
+        </cart_row>`).join('')}
+      </cart_rows>
+    </associations>`
+  } else {
+    // Si le panier est vide, envoyer un <cart_rows> vide pour vider les associations existantes
+    associationsXml = `
+    <associations>
+      <cart_rows></cart_rows>
+    </associations>`
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <cart>
+    ${id ? `<id>${id}</id>` : ''}
     <id_currency>${idCurrency}</id_currency>
     <id_customer>${customerId}</id_customer>
     <id_address_delivery>${addressId}</id_address_delivery>
     <id_address_invoice>${addressId}</id_address_invoice>
     <id_lang>${idLang}</id_lang>
-    <associations>
-      <cart_rows>${associationsXml}
-      </cart_rows>
-    </associations>
+    ${associationsXml}
   </cart>
 </prestashop>`
-
-  return xml
 }
 
-/**
- * Crée un panier dans PrestaShop
- * @param {Object} cartData - { customerId, items[] }
- * @returns {Promise<number>} ID du panier créé
- */
 export const createCart = async (cartData) => {
+  const api = resourceApi('carts')
+  
+  // Créer directement le panier AVEC les articles en un seul appel POST.
+  // C'est beaucoup plus simple et souvent plus fiable avec l'API PrestaShop.
+  const xml = buildCartXml(cartData)
+  const response = await api.create(xml)
+  
+  const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
+  if (!match) throw new Error('Could not get cart ID from response')
+  
+  const cartId = parseInt(match[1])
+  
+  return cartId
+}
+
+export const updateCart = async (cartId, cartData) => {
+  if (!cartId) throw new Error('cartId is required for updateCart')
+  const api = resourceApi('carts')
+  
+  // Reconstruire le XML complet avec les nouvelles données (y compris les items)
+  // et envoyer directement en PUT.
+  const fullCartData = { ...cartData, id: cartId }
+  const updateXml = buildCartXml(fullCartData)
+  
+  await api.update(cartId, updateXml)
+  console.info('[useCheckout] Cart updated', { cartId })
+  return true
+}
+
+export const deleteCart = async (cartId) => {
+  if (!cartId) return false
   try {
-    const xml = buildCartXml({
-      customerId: cartData.customerId,
-      addressId: cartData.addressId || 1,
-      items: cartData.items,
-    })
-
-    console.debug('[useCheckout] Creating cart with XML:', xml)
-
     const api = resourceApi('carts')
-    const response = await api.create(xml)
-
-    let cartId = null
-    if (response && typeof response === 'string') {
-      const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i) || response.match(/id["\s:=]+(\d+)/i)
-      cartId = match ? parseInt(match[1]) : null
-    }
-
-    console.info('[useCheckout] Cart created', { cartId, response })
-
-    if (!cartId) {
-      throw new Error('Impossible de récupérer l\'ID du panier créé')
-    }
-
-    return cartId
+    await api.remove(cartId)
+    console.info(`[useCheckout] Cart ${cartId} deleted`)
+    return true
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const body = error.body || ''
+    console.error(`[useCheckout] Error deleting cart ${cartId}`, error)
+    return false
+  }
+}
 
-    console.error('[useCheckout] Error creating cart', { message, body, error })
+const buildOrderXml = async (orderData) => {
+  const { customerId, paymentModule, addressId, items, cartId, statusId, secureKey } = orderData
 
-    let errorMsg = 'Impossible de créer le panier'
-    if (body) {
-      const xmlMatch = body.match(/<message><!\[CDATA\[(.*?)]]><\/message>/s)
-      if (xmlMatch) {
-        errorMsg = xmlMatch[1]
-      } else {
-        try {
-          const json = JSON.parse(body)
-          if (json.errors && Array.isArray(json.errors)) {
-            errorMsg = json.errors[0].message || errorMsg
-          }
-        } catch (e) {
-          // ignore
-        }
+  if (!customerId || !addressId || !items || items.length === 0) {
+    throw new Error('Missing data for order creation')
+  }
+
+  const { totalTaxAmount } = await calculateCartTaxes(items)
+  const totalProductsHT = items.reduce((sum, item) => sum + ((parseFloat(item.price) || 0) * (parseInt(item.quantity, 10) || 1)), 0)
+  const totalPaidTTC = parseFloat((totalProductsHT + totalTaxAmount).toFixed(2)) || 0
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+  <order>
+    <id_address_delivery>${addressId}</id_address_delivery>
+    <id_address_invoice>${addressId}</id_address_invoice>
+    <id_cart>${cartId}</id_cart>
+    <id_currency>1</id_currency>
+    <id_lang>1</id_lang>
+    <id_customer>${customerId}</id_customer>
+    <id_carrier>1</id_carrier>
+    <current_state>${statusId}</current_state>
+    <module>${paymentModule}</module>
+    <payment>Paiement à la livraison</payment>
+    <total_paid>${totalPaidTTC.toFixed(2)}</total_paid>
+    <total_paid_real>${totalPaidTTC.toFixed(2)}</total_paid_real>
+    <total_products>${totalProductsHT.toFixed(2)}</total_products>
+    <total_products_wt>${totalPaidTTC.toFixed(2)}</total_products_wt>
+    <conversion_rate>1.000000</conversion_rate>
+    <secure_key>${secureKey}</secure_key>
+  </order>
+</prestashop>`
+}
+
+const escapeXml = (text) => {
+  if (typeof text !== 'string') return ''
+  return text.replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'})[c])
+}
+
+export const createOrder = async (checkoutData) => {
+  // 1. Récupérer la secure_key du client
+  const customerApi = resourceApi('customers')
+  const customerRes = await customerApi.get(checkoutData.customerId)
+  
+  let secureKey = ''
+  const customerObj = customerRes?.customer || customerRes?.customers?.[0] || customerRes?.prestashop?.customer
+  if (customerObj) {
+      if (typeof customerObj.secure_key === 'string') {
+          secureKey = customerObj.secure_key
+      } else if (customerObj.secure_key && typeof customerObj.secure_key === 'object') {
+          secureKey = Object.values(customerObj.secure_key)[0]
       }
-    }
-
-    throw new Error(errorMsg)
+  } else if (customerRes?.__raw) {
+      const match = customerRes.__raw.match(/<secure_key>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/secure_key>/)
+      if (match) secureKey = match[1]
   }
+
+  if (!secureKey) {
+      console.error('[useCheckout] Failed to retrieve secure_key from:', customerRes)
+      throw new Error('Could not retrieve customer secure_key')
+  }
+
+  // 2. Créer l'entité Order
+  const orderXml = await buildOrderXml({ ...checkoutData, secureKey })
+  const orderApi = resourceApi('orders')
+  const orderResponse = await orderApi.create(orderXml)
+  
+  const orderIdMatch = orderResponse.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
+  if (!orderIdMatch) throw new Error('Could not get order ID from response')
+  const orderId = parseInt(orderIdMatch[1])
+
+  // 3. Créer les order_details pour chaque produit
+  const orderDetailsApi = resourceApi('order_details')
+  const { itemsWithTax } = await calculateCartTaxes(checkoutData.items)
+
+  for (const item of itemsWithTax) {
+    const detailXml = `<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+  <order_detail>
+    <id_order>${orderId}</id_order>
+    <product_id>${item.id}</product_id>
+    <product_attribute_id>${item.combinationId || 0}</product_attribute_id>
+    <product_name>${escapeXml(item.name)}</product_name>
+    <product_quantity>${item.quantity}</product_quantity>
+    <product_price>${item.price}</product_price>
+    <unit_price_tax_incl>${((item.price * (1 + item.taxRate / 100))).toFixed(2)}</unit_price_tax_incl>
+    <unit_price_tax_excl>${item.price}</unit_price_tax_excl>
+    <total_price_tax_incl>${((item.price * (1 + item.taxRate / 100)) * item.quantity).toFixed(2)}</total_price_tax_incl>
+    <total_price_tax_excl>${(item.price * item.quantity).toFixed(2)}</total_price_tax_excl>
+  </order_detail>
+</prestashop>`
+    await orderDetailsApi.create(detailXml)
+  }
+
+  return { success: true, orderId }
 }
 
-/**
- * Récupère le statut d'un panier
- * @param {number} cartId - ID du panier
- * @returns {Promise<Object>} Infos du panier
- */
-export const getCartStatus = async (cartId) => {
-  try {
-    const api = resourceApi('carts')
-    const response = await api.get(cartId, { display: '[id,id_customer,id_currency,id_lang]' })
-
-    let cart = null
-    if (response && response.prestashop) {
-      cart = response.prestashop.cart || response.prestashop.carts
-    }
-
-    console.debug('[useCheckout] Cart status:', cart)
-    return cart
-  } catch (error) {
-    console.warn('[useCheckout] Could not fetch cart status', error)
-    return null
-  }
-}
-
-/**
- * Récupère le statut d'une commande
- * @param {number} orderId - ID de la commande
- * @returns {Promise<Object>} Infos de la commande
- */
-export const getOrderStatus = async (orderId) => {
-  try {
-    const api = resourceApi('orders')
-    const response = await api.get(orderId, { display: '[id,reference,current_state,total_paid,date_add]' })
-
-    let order = null
-    if (response && response.prestashop) {
-      order = response.prestashop.order || response.prestashop.orders
-    }
-
-    console.debug('[useCheckout] Order status:', order)
-    return order
-  } catch (error) {
-    console.warn('[useCheckout] Could not fetch order status', error)
-    return null
-  }
-}
-
-/**
- * Valide les données nécessaires avant création
- * @param {Object} checkoutData - Données du checkout
- * @returns {Promise<Object>} Résultat de validation { isValid, errors[] }
- */
 export const validateCheckoutData = async (checkoutData) => {
   const errors = []
 
@@ -163,297 +250,112 @@ export const validateCheckoutData = async (checkoutData) => {
 
   if (!checkoutData.items || checkoutData.items.length === 0) {
     errors.push('Panier vide')
-  } else {
-    // Vérification des stocks serveur
-    try {
-        const stockApi = resourceApi('stock_availables')
-        const stockResponse = await stockApi.list({
-          display: '[id_product,id_product_attribute,quantity]',
-          limit: 1000,
-        })
-        
-        let stocks = []
-        if (Array.isArray(stockResponse)) {
-            stocks = stockResponse
-        } else if (stockResponse.stock_availables && Array.isArray(stockResponse.stock_availables)) {
-            stocks = stockResponse.stock_availables
-        } else if (stockResponse.prestashop?.stock_availables) {
-            const stocksData = stockResponse.prestashop.stock_availables.stock_available
-            stocks = Array.isArray(stocksData) ? stocksData : stocksData ? [stocksData] : []
-        }
-
-        checkoutData.items.forEach((item, idx) => {
-          if (!item.id || item.id <= 0) {
-             errors.push(`Article ${idx + 1} : ID produit invalide`)
-             return
-          }
-          if (!item.quantity || item.quantity <= 0) {
-              errors.push(`Article ${idx + 1} : Quantité invalide`)
-              return
-          }
-          if (!item.price || item.price < 0) {
-              errors.push(`Article ${idx + 1} : Prix invalide`)
-              return
-          }
-          
-          // Vérification du stock
-          const itemCombinationId = item.combinationId ? parseInt(item.combinationId) : 0
-          const itemStockEntries = stocks.filter(s => parseInt(s.id_product) === parseInt(item.id))
-          
-          let availableQty = 0
-          
-          if (itemStockEntries.length > 0) {
-              // Si le produit a des combinaisons
-              if (itemCombinationId > 0) {
-                 const comboStock = itemStockEntries.find(s => parseInt(s.id_product_attribute) === itemCombinationId)
-                 if (comboStock) availableQty = parseInt(comboStock.quantity || 0)
-              } else {
-                  // Total pour un produit sans combinaison
-                  availableQty = itemStockEntries.reduce((sum, s) => sum + parseInt(s.quantity || 0), 0)
-              }
-          }
-          
-          if (item.quantity > availableQty) {
-              errors.push(`Stock insuffisant pour l'article ${item.name}. (Demandé: ${item.quantity}, Disponible: ${availableQty})`)
-          }
-        })
-    } catch (e) {
-       console.error('[useCheckout] Erreur lors de la vérification des stocks', e)
-       errors.push("Impossible de vérifier la disponibilité des stocks.")
-    }
   }
-
+  
   return {
     isValid: errors.length === 0,
     errors,
   }
 }
 
-/**
- * Construit le XML d'une commande PrestaShop à partir des articles du panier
- * @param {Object} orderData - { customerId, paymentModule, addressId, items[], cartId }
- * @returns {string} XML payload
- */
-const buildOrderXml = (orderData) => {
-  const { customerId, paymentModule, addressId, items, cartId } = orderData
+// --- Autres fonctions utilitaires ---
 
-  if (!customerId || !addressId || items.length === 0) {
-    throw new Error('Données de commande incomplètes')
-  }
-
-  // Calculer les totaux
-  const totalProducts = items.reduce((sum, item) => sum + (item.price * item.quantity), 0)
-  const totalPaid = parseFloat(totalProducts.toFixed(2))
-  const totalPaidReal = parseFloat(totalProducts.toFixed(2))
-  const totalProductsWt = parseFloat(totalProducts.toFixed(2))
-
-  // Construire les lignes de commande
-  let associationsXml = ''
-  items.forEach((item) => {
-    associationsXml += `
-    <order_row>
-      <product_id>${item.id}</product_id>
-      <product_attribute_id>${item.combinationId || 0}</product_attribute_id>
-      <product_quantity_mutilated>0</product_quantity_mutilated>
-      <product_quantity>${item.quantity}</product_quantity>
-      <product_name>${escapeXml(item.name)}</product_name>
-      <product_reference></product_reference>
-      <product_ean13></product_ean13>
-      <product_isbn></product_isbn>
-      <product_upc></product_upc>
-      <product_price>${item.price}</product_price>
-    </order_row>`
-  })
-
-  // Créer le XML de la commande avec TOUS les champs requis
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<prestashop>
-  <order>
-    <id_address_delivery>${addressId}</id_address_delivery>
-    <id_address_invoice>${addressId}</id_address_invoice>
-    <id_cart>${cartId || 0}</id_cart>
-    <id_carrier>1</id_carrier>
-    <id_currency>1</id_currency>
-    <id_customer>${customerId}</id_customer>
-    <id_lang>1</id_lang>
-    <current_state>1</current_state>
-    <payment>Paiement à la livraison</payment>
-    <module>${escapeXml(paymentModule)}</module>
-    <total_paid>${totalPaid}</total_paid>
-    <total_paid_real>${totalPaidReal}</total_paid_real>
-    <total_products>${totalProducts.toFixed(2)}</total_products>
-    <total_products_wt>${totalProductsWt}</total_products_wt>
-    <conversion_rate>1</conversion_rate>
-    <associations>
-      <order_rows>${associationsXml}
-      </order_rows>
-    </associations>
-  </order>
-</prestashop>`
-
-  return xml
-}
-
-/**
- * Échappe les caractères spéciaux XML
- */
-const escapeXml = (text) => {
-  if (!text) return ''
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;')
-}
-
-/**
- * Crée une commande sur le serveur PrestaShop
- * @param {Object} checkoutData - { customerId, addressId, items[], paymentModule, cartId }
- * @returns {Promise<Object>} Commande créée avec l'ID
- */
-export const createOrder = async (checkoutData) => {
-  try {
-    const xml = buildOrderXml({
-      customerId: checkoutData.customerId,
-      addressId: checkoutData.addressId || 1, // Utiliser adresse par défaut si non fournie
-      paymentModule: checkoutData.paymentModule || 'bank-transfer',
-      items: checkoutData.items,
-      cartId: checkoutData.cartId || 0, // Utiliser le panier par défaut si non fourni
-    })
-
-    console.debug('[useCheckout] Creating order with XML:', xml)
-
-    const api = resourceApi('orders')
-    const response = await api.create(xml)
-
-    // Analyser la réponse pour obtenir l'ID de la commande
-    // La réponse peut être du texte brut contenant l'ID
-    let orderId = null
-    if (response && typeof response === 'string') {
-      // Essayer d'extraire l'ID du texte de réponse
-      const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i) || response.match(/id["\s:=]+(\d+)/i)
-      orderId = match ? parseInt(match[1]) : null
-    }
-
-    console.info('[useCheckout] Order created', { orderId, response })
-
-    return {
-      success: true,
-      orderId: orderId,
-      message: 'Commande créée avec succès',
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const body = error.body || ''
-
-    console.error('[useCheckout] Error creating order', {
-      message,
-      body,
-      error,
-    })
-
-    // Extraire le message d'erreur du XML/JSON si présent
-    let errorMsg = 'Impossible de créer la commande'
-    if (body) {
-      const xmlMatch = body.match(/<message><!\[CDATA\[(.*?)]]><\/message>/s)
-      if (xmlMatch) {
-        errorMsg = xmlMatch[1]
-      } else {
-        try {
-          const json = JSON.parse(body)
-          if (json.errors && Array.isArray(json.errors)) {
-            errorMsg = json.errors[0].message || errorMsg
-          }
-        } catch (e) {
-          // ignore
-        }
-      }
-    }
-
-    throw new Error(errorMsg)
-  }
-}
-
-/**
- * Récupère les adresses du client (optionnel pour le workflow simplifié)
- */
 export const getCustomerAddresses = async (customerId) => {
   try {
     const api = resourceApi('addresses')
-    const response = await api.list({
-      'filter[id_customer]': `${customerId}`,
-      display: '[id,firstname,lastname,address1,city,postcode]',
-      limit: 100,
-    })
-
-    // Extraire les adresses
-    let addresses = []
-    if (response && response.prestashop) {
-      const data = response.prestashop.addresses
-      if (Array.isArray(data)) {
-        addresses = data
-      } else if (data && typeof data === 'object') {
-        addresses = [data]
-      }
-    }
-
-    console.debug('[useCheckout] Customer addresses:', addresses)
-    return addresses
+    const response = await api.list({ 'filter[id_customer]': `[${customerId}]`, display: 'full' })
+    return extractItems(response, api.resource)
   } catch (error) {
     console.warn('[useCheckout] Could not fetch customer addresses', error)
     return []
   }
 }
 
-/**
- * Calcule le montant des taxes pour les items du panier
- */
-let cachedTaxes = null
-let cachedTaxRules = null
-
-export const calculateCartTaxes = async (items) => {
+export const getCartDetails = async (cartId) => {
   try {
-    if (!cachedTaxes) {
-      const taxesApi = resourceApi('taxes')
-      const tRes = await taxesApi.list({ display: '[id,rate]' })
-      cachedTaxes = Array.isArray(tRes) ? tRes : tRes?.prestashop?.taxes?.tax || []
-      if (!Array.isArray(cachedTaxes)) cachedTaxes = [cachedTaxes]
-    }
+    const api = resourceApi('carts')
+    const r = await api.get(cartId)
+    const cartItems = extractItems(r?.prestashop?.cart?.associations?.cart_rows, 'cart_row')
     
-    if (!cachedTaxRules) {
-      const rulesApi = resourceApi('tax_rules')
-      const rRes = await rulesApi.list({ display: '[id_tax_rules_group,id_tax,id_country]' })
-      cachedTaxRules = Array.isArray(rRes) ? rRes : rRes?.prestashop?.tax_rules?.tax_rule || []
-      if (!Array.isArray(cachedTaxRules)) cachedTaxRules = [cachedTaxRules]
+    if (!cartItems || cartItems.length === 0) {
+      return { items: [], customerId: r?.prestashop?.cart?.id_customer || 0, addressId: r?.prestashop?.cart?.id_address_delivery || 0 }
     }
 
-    let totalTaxAmount = 0
-    let itemsWithTax = items.map(item => ({ ...item, taxAmount: 0 }))
+    const productIds = cartItems.map(i => i.id_product).filter(Boolean).join('|')
+    let products = []
+    if (productIds) {
+      const pApi = resourceApi('products')
+      const pRes = await pApi.list({ display: 'full', 'filter[id]': `[${productIds}]` })
+      products = extractItems(pRes, pApi.resource)
+    }
 
-    for (let i = 0; i < itemsWithTax.length; i++) {
-      const item = itemsWithTax[i]
-      const groupId = item.id_tax_rules_group
-      if (!groupId || groupId === '0') continue
+    const comboIds = cartItems.map(i => i.id_product_attribute).filter(id => id && id !== '0').join('|')
+    let combinations = []
+    if (comboIds) {
+      const cApi = resourceApi('combinations')
+      const cRes = await cApi.list({ display: '[id,price]', 'filter[id]': `[${comboIds}]` }).catch(() => null)
+      if (cRes) combinations = extractItems(cRes, cApi.resource)
+    }
 
-      // Find the rule for this group (assuming default country or just the first matching tax)
-      // Ideally we filter by countryId, but let's just pick the first rule for this group
-      const rule = cachedTaxRules.find(r => r.id_tax_rules_group === String(groupId) || r.id_tax_rules_group === groupId)
-      if (rule) {
-        const tax = cachedTaxes.find(t => t.id === String(rule.id_tax) || t.id === rule.id_tax)
-        if (tax) {
-          const rate = parseFloat(tax.rate || 0)
-          const itemTax = (item.price * (rate / 100)) * item.quantity
-          item.taxAmount = itemTax
-          totalTaxAmount += itemTax
-        }
+    const items = cartItems.map(item => {
+      const p = products.find(p => String(p.id) === String(item.id_product))
+      const priceHT = (p && p.price) ? (parseFloat(String(p.price).replace(',', '.')) || 0) : 0
+      
+      let comboImpact = 0
+      if (item.id_product_attribute && item.id_product_attribute !== '0') {
+         const combo = combinations.find(c => String(c.id) === String(item.id_product_attribute))
+         if (combo && combo.price) {
+            comboImpact = parseFloat(String(combo.price).replace(',', '.')) || 0
+         }
       }
-    }
 
-    return { totalTaxAmount, itemsWithTax }
+      return {
+        id: item.id_product,
+        combinationId: item.id_product_attribute,
+        quantity: parseInt(item.quantity || 1, 10),
+        price: priceHT + comboImpact, // Le prix est toujours HT ici
+        name: p ? (extractItems(p.name, 'language')[0] || `Produit #${item.id_product}`) : `Produit #${item.id_product}`,
+        id_tax_rules_group: p ? p.id_tax_rules_group : 0
+      }
+    })
+
+    return { 
+      items, 
+      customerId: r?.prestashop?.cart?.id_customer || 0,
+      addressId: r?.prestashop?.cart?.id_address_delivery || 0 
+    }
   } catch (e) {
-    console.warn('[useCheckout] Could not calculate taxes', e)
-    return { totalTaxAmount: 0, itemsWithTax: items }
+    console.error(`[useCheckout] Erreur chargement panier ${cartId}`, e)
+    return { items: [], customerId: 0, addressId: 0 }
   }
 }
 
+// Supprime une commande avec cascade (order_details, order_histories)
+export const deleteOrder = async (orderId) => {
+  if (!orderId) throw new Error('orderId is required')
+  
+  // 1. Supprimer les lignes de commande (order_details)
+  try {
+    const detailsApi = resourceApi('order_details')
+    const dRes = await detailsApi.list({ 'filter[id_order]': `[${orderId}]`, display: '[id]' })
+    const details = extractItems(dRes, detailsApi.resource)
+    await Promise.allSettled(details.map(d => detailsApi.remove(d.id)))
+  } catch (e) {
+    console.warn('[deleteOrder] Could not delete order_details:', e.message)
+  }
+
+  // 2. Supprimer l'historique des statuts (order_histories)
+  try {
+    const histApi = resourceApi('order_histories')
+    const hRes = await histApi.list({ 'filter[id_order]': `[${orderId}]`, display: '[id]' })
+    const histories = extractItems(hRes, histApi.resource)
+    await Promise.allSettled(histories.map(h => histApi.remove(h.id)))
+  } catch (e) {
+    console.warn('[deleteOrder] Could not delete order_histories:', e.message)
+  }
+
+  // 3. Supprimer la commande elle-même
+  const orderApi = resourceApi('orders')
+  await orderApi.remove(orderId)
+  console.info(`[deleteOrder] Order ${orderId} deleted with cascade`)
+}

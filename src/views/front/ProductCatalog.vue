@@ -1,14 +1,24 @@
 <script setup>
-import { reactive } from 'vue'
+import { reactive, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
 import { useCart } from '@/api/useCart'
 import { getProductImageUrl } from '@/api/httpClient'
 
+const router = useRouter()
 const state = reactive({
   loading: true,
   products: [],
+  categories: [],
   error: '',
+})
+
+const filters = reactive({
+  name: '',
+  categoryId: '',
+  priceMin: '',
+  priceMax: '',
 })
 
 const quantities = reactive({})
@@ -23,6 +33,17 @@ const STOCK_STATUS = {
 
 const LOW_STOCK_THRESHOLD = 5
 
+// --- Badges HOT / NEW ---
+const getBadge = (dateStr) => {
+  if (!dateStr || dateStr === '0000-00-00') return null
+  const added = new Date(dateStr)
+  if (isNaN(added.getTime())) return null // Check if date is valid
+  const now = new Date()
+  const diffDays = (now - added) / (1000 * 60 * 60 * 24)
+  if (diffDays <= 1) return 'HOT'
+  if (diffDays <= 7) return 'NEW'
+  return null
+}
 
 const getStockStatus = (quantity) => {
   if (quantity <= 0) return STOCK_STATUS.OUT_OF_STOCK
@@ -54,9 +75,19 @@ const loadProducts = async () => {
   state.loading = true
   state.error = ''
   try {
+    // Charger les catégories
+    try {
+      const catApi = resourceApi('categories')
+      const catRes = await catApi.list({ display: '[id,name]', limit: 100 })
+      state.categories = extractItems(catRes, catApi.resource).map(c => ({
+        id: c.id,
+        name: typeof c.name === 'string' ? c.name : Object.values(c.name || {})[0] || `Cat #${c.id}`
+      }))
+    } catch (e) { /* ignore */ }
+
     const api = resourceApi('products')
     const response = await api.list({
-      display: '[id,name,price,id_default_image,active,id_tax_rules_group]',
+      display: '[id,name,price,id_default_image,active,id_tax_rules_group,date_add,available_date,id_category_default]',
       limit: 50,
     })
     const items = extractItems(response, api.resource)
@@ -69,7 +100,6 @@ const loadProducts = async () => {
         display: '[id_product,quantity]',
         limit: 100,
       })
-      console.log('[ProductCatalog] Stock response:', stockResponse)
 
       // La réponse peut venir directement comme Array ou wrappée dans prestashop
       let stocks = []
@@ -82,15 +112,12 @@ const loadProducts = async () => {
         stocks = Array.isArray(stocksData) ? stocksData : stocksData ? [stocksData] : []
       }
 
-      console.log('[ProductCatalog] Parsed stocks:', stocks)
-
       stocks.forEach(stock => {
         const productId = parseInt(stock.id_product)
         const qty = parseInt(stock.quantity || 0)
         // Additionner si plusieurs entrées (multi-entrepôt)
         stockMap[productId] = (stockMap[productId] || 0) + qty
       })
-      console.log('[ProductCatalog] Stock map after processing:', stockMap)
     } catch (e) {
       console.warn('[ProductCatalog] Could not load stock - will use product quantity field', e)
       // Fallback : charger quantity du produit directement
@@ -104,7 +131,6 @@ const loadProducts = async () => {
         itemsQty.forEach(p => {
           stockMap[parseInt(p.id)] = parseInt(p.quantity || 0)
         })
-        console.log('[ProductCatalog] Fallback stock map:', stockMap)
       } catch (e2) {
         console.warn('[ProductCatalog] Fallback also failed', e2)
       }
@@ -116,23 +142,26 @@ const loadProducts = async () => {
       .map(product => {
         const productId = parseInt(product.id)
         const quantity = stockMap[productId] !== undefined ? stockMap[productId] : 0
+
+        // Use available_date for badge, fallback to date_add
+        const dateForBadge = product.available_date && product.available_date !== '0000-00-00'
+          ? product.available_date
+          : product.date_add;
+
         return {
           id: productId,
           name: normalizeProductName(product.name),
           price: normalizePrice(product.price),
           quantity: quantity,
+          categoryId: parseInt(product.id_category_default) || 0,
           defaultImageId: product.id_default_image,
           imageUrl: product.id_default_image ? getProductImageUrl(productId, product.id_default_image) : '/images/placeholder-product.png',
           stockStatus: getStockStatus(quantity),
+          badge: getBadge(dateForBadge),
           active: product.active,
         }
       })
 
-    console.info('[ProductCatalog] loaded', {
-      count: state.products.length,
-      withStock: Object.keys(stockMap).length,
-      stockMap: stockMap
-    })
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
     console.error('[ProductCatalog] error loading products', error)
@@ -175,11 +204,6 @@ const addToCart = (product) => {
       }
     }, 2000)
 
-    console.info('[ProductCatalog] item added to cart', {
-      product: product.name,
-      quantity: numQty,
-      cartTotal: cartItemCount.value,
-    })
   } catch (error) {
     state.error = error.message
   }
@@ -187,6 +211,31 @@ const addToCart = (product) => {
 
 const handleImageError = (event) => {
   event.target.src = '/images/placeholder-product.png'
+}
+
+const handleLogout = () => {
+  sessionStorage.removeItem('customerId')
+  sessionStorage.removeItem('isAnonymous')
+  localStorage.removeItem('customerId')
+  router.push('/front/login')
+}
+
+const filteredProducts = computed(() => {
+  return state.products.filter(p => {
+    if (filters.name && !p.name.toLowerCase().includes(filters.name.toLowerCase())) return false
+    if (filters.categoryId && p.categoryId !== parseInt(filters.categoryId)) return false
+    const price = parseFloat(p.price)
+    if (filters.priceMin !== '' && price < parseFloat(filters.priceMin)) return false
+    if (filters.priceMax !== '' && price > parseFloat(filters.priceMax)) return false
+    return true
+  })
+})
+
+const clearFilters = () => {
+  filters.name = ''
+  filters.categoryId = ''
+  filters.priceMin = ''
+  filters.priceMax = ''
 }
 
 // Load products on mount
@@ -208,8 +257,25 @@ loadProducts()
           🛒 Panier
           <span v-if="cartItemCount > 0" class="badge">{{ cartItemCount }}</span>
         </RouterLink>
+        <button @click="handleLogout" class="button button--danger" style="margin-left: 0.5rem;">Déconnexion</button>
       </div>
     </header>
+
+    <!-- Search & Filters -->
+    <div class="search-bar">
+      <input v-model="filters.name" type="text" placeholder="🔍 Rechercher par nom..." class="search-input" />
+      <select v-model="filters.categoryId" class="search-select">
+        <option value="">Toutes les catégories</option>
+        <option v-for="cat in state.categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+      </select>
+      <div class="price-range">
+        <input v-model="filters.priceMin" type="number" placeholder="Prix min (€)" class="price-input" min="0" />
+        <span class="price-sep">–</span>
+        <input v-model="filters.priceMax" type="number" placeholder="Prix max (€)" class="price-input" min="0" />
+      </div>
+      <button v-if="filters.name || filters.categoryId || filters.priceMin || filters.priceMax" @click="clearFilters" class="button button--ghost btn-clear">✕ Effacer</button>
+      <span class="results-count">{{ filteredProducts.length }} produit(s)</span>
+    </div>
 
     <!-- Error Block -->
     <div v-if="state.error && !state.error.includes('ajouté au panier')" class="error-block">
@@ -227,13 +293,13 @@ loadProducts()
     </div>
 
     <!-- Empty State -->
-    <div v-else-if="state.products.length === 0" class="empty-state">
-      <p class="muted">Aucun produit disponible pour le moment.</p>
+    <div v-else-if="filteredProducts.length === 0" class="empty-state">
+      <p class="muted">Aucun produit ne correspond à vos critères.</p>
     </div>
 
     <!-- Products Grid -->
     <div v-else class="products-grid">
-      <div v-for="product in state.products" :key="product.id" class="product-card">
+      <div v-for="product in filteredProducts" :key="product.id" class="product-card">
         <!-- Product Image -->
         <RouterLink
           :to="{ name: 'front-product-detail', params: { id: product.id } }"
@@ -241,12 +307,12 @@ loadProducts()
           :aria-label="`Voir la fiche de ${product.name}`"
         >
           <img :src="product.imageUrl" :alt="product.name" @error="handleImageError" />
-          <div v-if="product.stockStatus === 'out_of_stock'" class="stock-badge stock-badge--out">
-            Épuisé
-          </div>
-          <div v-else-if="product.stockStatus === 'low'" class="stock-badge stock-badge--low">
-            Stock faible
-          </div>
+          <!-- Badge HOT / NEW -->
+          <div v-if="product.badge === 'HOT'" class="product-badge product-badge--hot">🔥 HOT</div>
+          <div v-else-if="product.badge === 'NEW'" class="product-badge product-badge--new">✨ NEW</div>
+          <!-- Stock -->
+          <div v-if="product.stockStatus === 'out_of_stock'" class="stock-badge stock-badge--out">Épuisé</div>
+          <div v-else-if="product.stockStatus === 'low'" class="stock-badge stock-badge--low">Stock faible</div>
         </RouterLink>
 
         <!-- Product Info -->
@@ -322,6 +388,9 @@ loadProducts()
 
 .catalog-header__cart {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .badge {
@@ -431,15 +500,67 @@ loadProducts()
   text-transform: uppercase;
 }
 
-.stock-badge--out {
-  background: #c33;
-  color: white;
-}
+.stock-badge--out { background: #c33; color: white; }
+.stock-badge--low { background: #ff9800; color: white; }
 
-.stock-badge--low {
-  background: #ff9800;
-  color: white;
+.product-badge {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15);
 }
+.product-badge--hot { background: linear-gradient(135deg,#ff4500,#ff8c00); color: #fff; }
+.product-badge--new { background: linear-gradient(135deg,#6c63ff,#48cfad); color: #fff; }
+
+/* Search bar */
+.search-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding: 1rem 1.25rem;
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 10px;
+}
+.search-input {
+  flex: 2;
+  min-width: 200px;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.search-select {
+  flex: 1;
+  min-width: 150px;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  background: white;
+}
+.price-range {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.price-input {
+  width: 100px;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.price-sep { color: #6c757d; font-weight: 600; }
+.btn-clear { padding: 0.5rem 0.9rem; font-size: 0.85rem; }
+.results-count { color: #6c757d; font-size: 0.85rem; margin-left: auto; }
 
 .product-card__info {
   padding: 1rem;

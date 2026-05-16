@@ -2,6 +2,7 @@ import { DEFAULT_CATEGORY_ID, DEFAULT_LANG_ID } from './constants'
 import { createCrud, getXml, postXml, putXml } from './crud'
 import { buildEntityXml, extractIdsByTag, getIdFromXml, getText, langField, parseXml } from '@/utils/xmlUtils'
 import { slugify } from '@/utils/stringUtils'
+import { resourceApi } from '@/api/resources'
 
 export function listProductIds() {
   const crud = createCrud('products', 'product')
@@ -25,7 +26,7 @@ export async function findProductIdByReference(reference) {
   }
   const xml = await getXml('products', {
     display: '[id]',
-    'filter[reference]': reference
+    'filter[reference]': `[${reference}]`
   })
   const doc = parseXml(xml)
   const ids = extractIdsByTag(doc, 'product')
@@ -39,8 +40,8 @@ export async function findProductInfoByReference(reference) {
     return null
   }
   const xml = await getXml('products', {
-    display: '[id,reference,price,name]',
-    'filter[reference]': reference
+    display: '[id,reference,price,name,id_tax_rules_group]',
+    'filter[reference]': `[${reference}]`
   })
   const doc = parseXml(xml)
   const node = doc.querySelector('product')
@@ -53,10 +54,12 @@ export async function findProductInfoByReference(reference) {
   }
   const name = getText(node, 'name')
   const price = Number.parseFloat(getText(node, 'price') || '0')
+  const idTaxRulesGroup = Number.parseInt(getText(node, 'id_tax_rules_group') || '0', 10)
   return {
     id,
     name,
-    price: Number.isFinite(price) ? price : 0
+    price: Number.isFinite(price) ? price : 0,
+    id_tax_rules_group: idTaxRulesGroup
   }
 }
 
@@ -64,6 +67,19 @@ export async function updateProduct(id, data, langId = DEFAULT_LANG_ID) {
   const payload = buildProductPayload({ ...data, id }, langId)
   const xml = buildEntityXml('product', payload)
   await putXml(`products/${id}`, xml)
+}
+
+export async function patchProductAvailableDate(id, availableDate) {
+  if (!id || !availableDate) return;
+  const api = resourceApi('products')
+  const xmlBody = `<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+  <product>
+    <id>${id}</id>
+    <available_date><![CDATA[${availableDate}]]></available_date>
+  </product>
+</prestashop>`
+  await api.patch(id, xmlBody)
 }
 
 function buildProductPayload(data, langId) {
@@ -82,15 +98,23 @@ function buildProductPayload(data, langId) {
   const minimalQuantity = data.minimalQuantity ?? 1
   const taxRulesGroupId = data.taxRulesGroupId ?? 0
 
+  // Associer à la catégorie d'Accueil (2) par défaut et à la nouvelle catégorie créée
+  const categoryAssociations = [
+    { id: 2 }
+  ]
+  if (categoryId !== 2) {
+    categoryAssociations.push({ id: categoryId })
+  }
+
   return {
     id: data.id,
     active,
+    state: 1, // Très important pour que le produit soit visible dans le BackOffice PrestaShop 1.7+
+    indexed: 1,
+    id_shop_default: 1,
     price,
     id_category_default: categoryId,
-    id_shop_default: 1,
-    state: 1,
     visibility: 'both',
-    indexed: 1,
     name: langField(name, langId),
     link_rewrite: langField(linkRewrite, langId),
     description: langField(description, langId),
@@ -104,9 +128,7 @@ function buildProductPayload(data, langId) {
     id_tax_rules_group: taxRulesGroupId,
     associations: {
       categories: {
-        category: {
-          id: categoryId
-        }
+        category: categoryAssociations
       }
     }
   }

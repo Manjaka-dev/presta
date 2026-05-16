@@ -2,6 +2,7 @@
 import { reactive } from 'vue'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
+import { createOrder, deleteOrder, getCartDetails } from '@/api/useCheckout'
 
 // Tous les statuts disponibles
 const EDITABLE_STATUSES = reactive({})
@@ -14,7 +15,6 @@ const ALLOWED_STATUS_IDS = [] // ex: [1, 2, 6]
 // Si ALLOWED_STATUS_IDS contient des valeurs, il a priorité.
 const ALLOWED_STATUS_NAMES = [
     'Annulé',
-    'Erreur de paiement',
     'Paiement accepté'
 ] // ex: ['Annulé', 'Payment failed']
 
@@ -24,8 +24,8 @@ const ALLOWED_STATUS_NAMES = [
 // { 'Annulé': 'Arrêter' }     -> remplace par nom exact retourné par l'API
 const NAME_OVERRIDES = {
   // 6: 'Arrêter',
-  'Erreur de paiement': 'echec paiement',
-  'Paiement accepté': 'paiement effectué'
+  'Paiement accepté': 'paiement effectué',
+  'Annulé': 'annulé'
 }
 // --- fin configuration ---
 
@@ -114,21 +114,46 @@ const loadOrders = async () => {
   state.loading = true
   state.error = ''
   try {
+    // Commandes réelles
     const api = resourceApi('orders')
     const response = await api.list({
-      display: '[id,id_customer,total_paid,date_add,current_state]',
+      display: '[id,id_customer,id_cart,total_paid,date_add,current_state]',
       limit: 50,
     })
     const items = extractItems(response, api.resource)
-    state.orders = items.map(order => ({
+    const orders = items.map(order => ({
       id: order.id,
+      cartId: order.id_cart,
       customer: order.id_customer,
       total: order.total_paid,
       date: order.date_add,
       statusId: parseInt(order.current_state),
+      type: 'order',
     }))
+
+    // Paniers sans commande (statut virtuel 'cart')
+    const cartApi = resourceApi('carts')
+    const cartRes = await cartApi.list({
+      display: '[id,id_customer,date_add]',
+      limit: 100,
+    })
+    const allCarts = extractItems(cartRes, cartApi.resource)
+    const orderedCartIds = new Set(orders.map(o => String(o.cartId)))
+    const cartOrders = allCarts
+      .filter(c => !orderedCartIds.has(String(c.id)) && parseInt(c.id_customer) > 0)
+      .map(c => ({
+        id: `cart-${c.id}`,
+        cartId: c.id,
+        customer: c.id_customer,
+        total: 0,
+        date: c.date_add,
+        statusId: 'cart',
+        type: 'cart',
+      }))
+
+    state.orders = [...orders, ...cartOrders].sort((a, b) => new Date(b.date) - new Date(a.date))
     state.total = state.orders.length
-    console.info('[OrdersBackoffice] loaded', { count: state.total })
+    console.info('[OrdersBackoffice] loaded', { orders: orders.length, carts: cartOrders.length })
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
     console.error('[OrdersBackoffice] error', error)
@@ -145,9 +170,13 @@ const isEditableStatus = (statusId) => {
   return statusId in EDITABLE_STATUSES
 }
 
+// IDs des statuts clés
+const STATUS_PAID = 2
+const STATUS_CANCELLED = 6
+
 const startEditing = (orderId, currentStatusId) => {
   editing.orderId = orderId
-  editing.statusId = currentStatusId
+  editing.statusId = currentStatusId === 'cart' ? 'cart' : currentStatusId
 }
 
 const cancelEditing = () => {
@@ -156,38 +185,58 @@ const cancelEditing = () => {
 }
 
 const saveStatus = async () => {
-  if (!editing.orderId || !editing.statusId) return
-
+  if (!editing.orderId || editing.statusId === null) return
   editing.saving = true
+  state.error = ''
+
+  const order = state.orders.find(o => o.id === editing.orderId)
+  if (!order) { editing.saving = false; return }
+
+  const fromStatus = order.statusId
+  const toStatus = editing.statusId
+
   try {
-    const api = resourceApi('orders')
-    // Pour mettre à jour le statut, on doit patcher avec le champ current_state
-    // L'ID est requis dans le XML pour la mise à jour
-    const xmlBody = `<?xml version="1.0" encoding="UTF-8"?>
+    // --- CAS 1 : Panier → Commande (payée ou annulée) ---
+    if (fromStatus === 'cart' && toStatus !== 'cart') {
+      const statusId = parseInt(toStatus)
+      // Récupérer les infos du panier pour construire la commande
+      const cartData = await getCartDetails(order.cartId)
+      await createOrder({
+        customerId: parseInt(cartData.customerId || order.customer),
+        addressId: parseInt(cartData.addressId) || 1,
+        cartId: order.cartId,
+        paymentModule: 'ps_cashondelivery',
+        statusId,
+        items: cartData.items,
+      })
+      console.info('[OrdersBackoffice] Created order from cart', { cartId: order.cartId, statusId })
+    }
+    // --- CAS 2 : Commande → Panier (supprimer la commande) ---
+    else if (fromStatus !== 'cart' && toStatus === 'cart') {
+      await deleteOrder(parseInt(order.id))
+      console.info('[OrdersBackoffice] Deleted order, restored cart', { orderId: order.id })
+    }
+    // --- CAS 3 : Changement de statut simple (payée ↔ annulée etc.) ---
+    else if (fromStatus !== 'cart' && toStatus !== 'cart') {
+      const statusId = parseInt(toStatus)
+      const api = resourceApi('orders')
+      const xmlBody = `<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <order>
-    <id>${editing.orderId}</id>
-    <current_state>${editing.statusId}</current_state>
+    <id>${order.id}</id>
+    <current_state>${statusId}</current_state>
   </order>
 </prestashop>`
-
-    await api.patch(editing.orderId, xmlBody)
-
-    // Mettre à jour l'ordre dans la liste
-    const order = state.orders.find(o => o.id === editing.orderId)
-    if (order) {
-      order.statusId = editing.statusId
+      await api.patch(order.id, xmlBody)
+      console.info('[OrdersBackoffice] status patched', { orderId: order.id, statusId })
     }
 
-    console.info('[OrdersBackoffice] status updated', {
-      orderId: editing.orderId,
-      newStatus: editing.statusId,
-    })
-
+    // Recharger la liste pour refléter l'état réel
+    await loadOrders()
     cancelEditing()
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
-    console.error('[OrdersBackoffice] update error', error)
+    console.error('[OrdersBackoffice] saveStatus error', error)
   } finally {
     editing.saving = false
   }
@@ -232,23 +281,30 @@ init()
         <div class="col--action">Action</div>
       </div>
 
-      <div v-for="order in state.orders" :key="order.id" class="orders-list__row">
-        <div class="col--id">{{ order.id }}</div>
+      <div v-for="order in state.orders" :key="order.id" class="orders-list__row" :class="order.type === 'cart' ? 'row--cart' : ''">
+        <div class="col--id">
+          {{ order.type === 'cart' ? `🛒 #${order.cartId}` : `#${order.id}` }}
+        </div>
         <div class="col--customer">{{ order.customer }}</div>
         <div class="col--total">{{ parseFloat(order.total).toFixed(2) }}€</div>
         <div class="col--date">{{ new Date(order.date).toLocaleDateString() }}</div>
 
         <div class="col--status">
           <template v-if="editing.orderId === order.id">
-            <select v-model.number="editing.statusId" class="status-select small">
+            <select
+              :value="editing.statusId"
+              @change="e => editing.statusId = e.target.value === 'cart' ? 'cart' : parseInt(e.target.value)"
+              class="status-select small"
+            >
+              <option value="cart">dans le panier</option>
               <option v-for="(label, statusId) in EDITABLE_STATUSES" :key="statusId" :value="parseInt(statusId)">
                 {{ label }}
               </option>
             </select>
           </template>
           <template v-else>
-            <span class="status-badge" :class="`status-${order.statusId}`">
-              {{ getStatusLabel(order.statusId) }}
+            <span class="status-badge" :class="order.statusId === 'cart' ? 'status-cart' : `status-${order.statusId}`">
+              {{ order.statusId === 'cart' ? '🛒 dans le panier' : getStatusLabel(order.statusId) }}
             </span>
           </template>
         </div>
@@ -272,7 +328,7 @@ init()
               Annuler
             </button>
           </template>
-          <template v-else-if="isEditableStatus(order.statusId)">
+          <template v-else-if="isEditableStatus(order.statusId) || order.type === 'cart'">
             <button
               class="button button--small button--ghost"
               type="button"
@@ -390,20 +446,12 @@ init()
   color: #333;
 }
 
-.status-badge.status-1 {
-  background: #d4edda;
-  color: #155724;
-}
+.status-badge.status-1 { background: #d4edda; color: #155724; }
+.status-badge.status-2 { background: #cce5ff; color: #004085; }
+.status-badge.status-6 { background: #f0f0f0; color: #666; }
+.status-badge.status-cart { background: #fff3cd; color: #856404; }
 
-.status-badge.status-2 {
-  background: #f8d7da;
-  color: #721c24;
-}
-
-.status-badge.status-6 {
-  background: #f0f0f0;
-  color: #666;
-}
+.row--cart { background: #fffdf0; }
 
 .status-select {
   border: 1px solid var(--border);

@@ -37,7 +37,7 @@ function onImagesSelected(event) {
   const files = event.target?.files
   sections.images.files = files ? Array.from(files) : []
   sections.images.status = sections.images.files.length
-    ? `${sections.images.files.length} image(s) chargée(s)`
+    ? `${sections.images.files.length} fichier(s) sélectionné(s)`
     : ''
   sections.images.result = null
 }
@@ -48,7 +48,7 @@ async function startImport(target) {
 
   if (target === 'images') {
     if (!section.files.length) {
-      section.status = 'Chargez des images d\'abord.'
+      section.status = 'Chargez des images ou un fichier ZIP d\'abord.'
       return
     }
   } else {
@@ -210,11 +210,11 @@ async function startAll() {
       <div class="import-card" :class="{ 'import-card--running': sections.images.running }">
         <div class="import-card__icon">🖼️</div>
         <h2 class="import-card__title">Images</h2>
-        <p class="import-card__desc">Images produit (nom du fichier = référence produit)</p>
+        <p class="import-card__desc">Images produit (.zip ou images, nom du fichier = référence)</p>
         <label class="import-card__input-wrap">
           <input
             type="file"
-            accept="image/*"
+            accept=".zip,image/*"
             multiple
             class="import-card__file"
             @change="onImagesSelected($event)"

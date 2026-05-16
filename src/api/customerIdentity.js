@@ -1,4 +1,6 @@
 import { ref } from 'vue'
+import { resourceApi } from '@/api/resources'
+import { extractItems } from '@/utils/resourceData.js'
 
 const STORAGE_KEY = 'customerId'
 
@@ -27,21 +29,31 @@ export const useCustomer = () => {
   const customer = ref(null)
 
   const loadCustomer = async () => {
-    // In a real app, this would likely fetch customer details from the API
     const id = getCustomerId()
-    
-    if (id) {
-       customer.value = {
-          id: id,
-          addressId: 1 // Default mock address ID
-       }
-    } else {
-       customer.value = null
+    if (!id) {
+      customer.value = null
+      return
+    }
+
+    try {
+      // Récupérer la vraie première adresse du client via l'API
+      const addrApi = resourceApi('addresses')
+      const addrRes = await addrApi.list({ 'filter[id_customer]': String(id), display: '[id]' })
+      const addresses = extractItems(addrRes, addrApi.resource)
+      const addressId = addresses && addresses.length > 0 ? parseInt(addresses[0].id) : 1
+
+      customer.value = {
+        id,
+        addressId,
+      }
+    } catch (e) {
+      console.warn('[useCustomer] Could not fetch address, using default:', e.message)
+      customer.value = { id, addressId: 1 }
     }
   }
 
   return {
     customer,
-    loadCustomer
+    loadCustomer,
   }
 }

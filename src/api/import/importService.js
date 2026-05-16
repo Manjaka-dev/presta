@@ -4,7 +4,7 @@
  */
 import { DEFAULT_CATEGORY_ID, DEFAULT_LANG_ID } from './constants'
 import { createCategory, findCategoryIdByName } from './categoriesService'
-import { createProduct, findProductIdByReference, findProductInfoByReference, updateProduct } from './productsService'
+import { createProduct, findProductIdByReference, findProductInfoByReference, updateProduct, patchProductAvailableDate } from './productsService'
 import { setQuantityForProduct, setQuantityForProductAttribute } from './stockAvailablesService'
 import { uploadProductImage } from './imagesService'
 import { createProductOption, findProductOptionIdByName } from './productOptionsService'
@@ -12,7 +12,7 @@ import { createProductOptionValue, findProductOptionValueIdByName } from './prod
 import { createCombinationForProduct, findCombinationByProductAndValueId } from './combinationsService'
 import { buildOrderConfig, createOrderFromCsvRow, validateOrderConfig } from './commandeService'
 import { slugify, toFloat, toInt, formatMoney } from '@/utils/stringUtils'
-import { ensureTaxSystem } from './taxesService'
+import { ensureTaxSystem, getTaxRateByGroupId } from './taxesService'
 
 /**
  * Point d'entrée principal
@@ -43,6 +43,25 @@ export async function runImport({ target, rows = [], files = [], onProgress }) {
   return { total: rows.length, success: 0 }
 }
 
+function formatError(error) {
+  let msg = error.message || String(error)
+  if (error.body) {
+    try {
+      const match = error.body.match(/<message><!\[CDATA\[(.*?)\]\]><\/message>/s)
+      if (match) {
+        msg += ` | Détail API: ${match[1].trim()}`
+      } else {
+        // Nettoyer un peu le HTML/XML brut pour l'affichage
+        const cleanBody = error.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        msg += ` | Réponse API: ${cleanBody.substring(0, 150)}...`
+      }
+    } catch (e) {
+      // Ignorer
+    }
+  }
+  return msg
+}
+
 // ─── Produits ────────────────────────────────────────────────────────────────
 
 async function importProducts(rows, progress) {
@@ -58,55 +77,53 @@ async function importProducts(rows, progress) {
       continue
     }
 
-    const categoryName = row.categorie?.trim()
-    const categoryId = await ensureCategoryId(categoryName)
-    const availableDate = toIsoDate(row.date_availability_produit || row.date_produit || row.date)
+    try {
+      const categoryName = row.categorie?.trim()
+      const categoryId = await ensureCategoryId(categoryName)
+      const availableDate = toIsoDate(row.date_availability_produit || row.date_produit || row.date)
 
-    // Gestion des taxes
-    let taxRulesGroupId = 0
-    let taxRate = 0
-    const taxCol = row.taxe || row.Taxe || row.tva || row.TVA || ''
-    if (taxCol) {
-      try {
+      // Gestion des taxes
+      let taxRulesGroupId = 0
+      let taxRate = 0
+      const taxCol = row.taxe || row.Taxe || row.tva || row.TVA || ''
+      if (taxCol) {
         const countryId = toInt(import.meta.env.VITE_DEFAULT_COUNTRY_ID || '8', 8)
         const taxSystem = await ensureTaxSystem(taxCol, countryId)
         if (taxSystem) {
           taxRulesGroupId = taxSystem.taxRulesGroupId
           taxRate = taxSystem.rate
         }
-      } catch (err) {
-        progress(`Ligne ${index + 1}: Erreur création taxe: ${err.message}`)
       }
-    }
 
-    const prixTtc = toFloat(row.prix_ttc || '0', 0)
-    const priceHt = taxRate > 0 ? prixTtc / (1 + (taxRate / 100)) : prixTtc
-    const wholesalePriceTtc = toFloat(row.prix_achat || '0', 0)
-    const wholesalePriceHt = taxRate > 0 ? wholesalePriceTtc / (1 + (taxRate / 100)) : wholesalePriceTtc
+      const prixTtc = toFloat(row.prix_ttc || '0', 0)
+      const priceHt = taxRate > 0 ? prixTtc / (1 + (taxRate / 100)) : prixTtc
+      const wholesalePriceTtc = toFloat(row.prix_achat || '0', 0)
+      const wholesalePriceHt = taxRate > 0 ? wholesalePriceTtc / (1 + (taxRate / 100)) : wholesalePriceTtc
 
-    const input = {
-      name,
-      reference,
-      price: priceHt,
-      wholesalePrice: wholesalePriceHt,
-      categoryId,
-      availableDate,
-      linkRewrite: slugify(name),
-      taxRulesGroupId
-    }
+      const input = {
+        name,
+        reference,
+        price: priceHt,
+        wholesalePrice: wholesalePriceHt,
+        categoryId,
+        availableDate,
+        linkRewrite: slugify(name),
+        taxRulesGroupId
+      }
 
-    try {
       const existingId = await findProductIdByReference(reference)
       if (existingId) {
         await updateProduct(existingId, input, DEFAULT_LANG_ID)
+        if (input.availableDate) await patchProductAvailableDate(existingId, input.availableDate)
         progress(`Ligne ${index + 1}: produit "${name}" mis à jour (ID ${existingId})`)
       } else {
         const newId = await createProduct(input, DEFAULT_LANG_ID)
+        if (input.availableDate) await patchProductAvailableDate(newId, input.availableDate)
         progress(`Ligne ${index + 1}: produit "${name}" créé (ID ${newId})`)
       }
       success += 1
     } catch (error) {
-      progress(`Ligne ${index + 1}: ERREUR — ${error.message}`)
+      progress(`Ligne ${index + 1}: ERREUR — ${formatError(error)}`)
     }
   }
 
@@ -129,64 +146,76 @@ async function importStocks(rows, progress) {
     const reference = row.reference?.trim()
     if (!reference) continue
 
-    const productInfo = await getProductInfoByReference(reference, productCache)
-    if (!productInfo) {
-      progress(`Stock ligne ${index + 1}: produit non trouvé pour "${reference}"`)
-      continue
-    }
-
-    const specificite = getSpecificite(row)
-    const karazany = row.karazany?.trim()
-    const quantity = toInt(row.stock_initial || '0', 0)
-
-    if (specificite && karazany) {
-      hasCombination.add(reference)
-      const groupId = await ensureProductOptionId(specificite, optionCache)
-      const valueId = await ensureProductOptionValueId(groupId, karazany, valueCache)
-      const salePrice = row.prix_vente_ttc
-        ? toFloat(row.prix_vente_ttc || '0', productInfo.price)
-        : productInfo.price
-      const combinationId = await ensureCombinationId(
-        productInfo, valueId, reference, karazany, salePrice, combinationCache
-      )
-
-      if (!combinationId) {
-        progress(`Stock ligne ${index + 1}: impossible de créer la déclinaison pour "${reference}" ${karazany}`)
+    try {
+      const productInfo = await getProductInfoByReference(reference, productCache)
+      if (!productInfo) {
+        progress(`Stock ligne ${index + 1}: produit non trouvé pour "${reference}"`)
         continue
       }
 
-      try {
+      const specificite = getSpecificite(row)
+      const karazany = row.karazany?.trim()
+      const quantity = toInt(row.stock_initial || '0', 0)
+
+      if (specificite && karazany) {
+        hasCombination.add(reference)
+        const groupId = await ensureProductOptionId(specificite, optionCache)
+        const valueId = await ensureProductOptionValueId(groupId, karazany, valueCache)
+        
+        let priceImpactStr = '0.00'
+        if (row.prix_vente_ttc) {
+          const salePriceTtc = toFloat(row.prix_vente_ttc || '0', 0)
+          
+          let taxRate = 0
+          if (productInfo.id_tax_rules_group) {
+            taxRate = await getTaxRateByGroupId(productInfo.id_tax_rules_group)
+          }
+          
+          const priceHtFinal = taxRate > 0 ? salePriceTtc / (1 + (taxRate / 100)) : salePriceTtc
+          const impact = priceHtFinal - productInfo.price
+          priceImpactStr = formatMoney(impact)
+        }
+
+        const combinationId = await ensureCombinationId(
+          productInfo, valueId, reference, karazany, priceImpactStr, combinationCache
+        )
+
+        if (!combinationId) {
+          progress(`Stock ligne ${index + 1}: impossible de créer la déclinaison pour "${reference}" ${karazany}`)
+          continue
+        }
+
         await setQuantityForProductAttribute(productInfo.id, combinationId, quantity)
         progress(`Stock ligne ${index + 1}: "${reference}" ${karazany} → ${quantity} unités`)
         success += 1
-      } catch (error) {
-        progress(`Stock ligne ${index + 1}: ERREUR — ${error.message}`)
+
+        const total = baseStockTotals.get(reference) || 0
+        baseStockTotals.set(reference, total + quantity)
+        continue
       }
 
+      // Pas de déclinaison — stock simple
       const total = baseStockTotals.get(reference) || 0
       baseStockTotals.set(reference, total + quantity)
-      continue
+    } catch (error) {
+      progress(`Stock ligne ${index + 1}: ERREUR — ${formatError(error)}`)
     }
-
-    // Pas de déclinaison — stock simple
-    const total = baseStockTotals.get(reference) || 0
-    baseStockTotals.set(reference, total + quantity)
   }
 
   // Mettre à jour le stock de base pour les produits sans déclinaison
   for (const [reference, total] of baseStockTotals.entries()) {
     if (hasCombination.has(reference)) continue
-    const productId = await findProductIdByReference(reference)
-    if (!productId) {
-      progress(`Stock: produit non trouvé pour "${reference}"`)
-      continue
-    }
     try {
+      const productId = await findProductIdByReference(reference)
+      if (!productId) {
+        progress(`Stock: produit non trouvé pour "${reference}"`)
+        continue
+      }
       await setQuantityForProduct(productId, total)
       progress(`Stock: "${reference}" → ${total} unités`)
       success += 1
     } catch (error) {
-      progress(`Stock "${reference}": ERREUR — ${error.message}`)
+      progress(`Stock "${reference}": ERREUR — ${formatError(error)}`)
     }
   }
 
@@ -198,16 +227,22 @@ async function importStocks(rows, progress) {
 async function importOrders(rows, progress) {
   let success = 0
   const config = buildOrderConfig()
-  validateOrderConfig(config)
+  
+  try {
+    validateOrderConfig(config)
+  } catch (error) {
+    progress(`Configuration Commande ERREUR — ${formatError(error)}`)
+    return { total: rows.length, success }
+  }
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index]
     try {
-      const orderId = await createOrderFromCsvRow(row, config)
-      progress(`Commande ligne ${index + 1}: créée (ID ${orderId})`)
+      const result = await createOrderFromCsvRow(row, config)
+      progress(`Commande ligne ${index + 1}: créée avec succès (${result})`)
       success += 1
     } catch (error) {
-      progress(`Commande ligne ${index + 1}: ERREUR — ${error.message}`)
+      progress(`Commande ligne ${index + 1}: ERREUR — ${formatError(error)}`)
     }
   }
 
@@ -218,30 +253,61 @@ async function importOrders(rows, progress) {
 
 async function importImages(files, progress) {
   let success = 0
-  const list = Array.from(files || [])
+  let imagesToProcess = []
 
-  for (let index = 0; index < list.length; index += 1) {
-    const file = list[index]
+  try {
+    const JSZip = (await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm')).default
+    
+    for (const file of files) {
+      if (file.name.toLowerCase().endsWith('.zip')) {
+        progress(`Décompression de ${file.name}...`)
+        const zip = new JSZip()
+        const zipContent = await zip.loadAsync(file)
+        
+        for (const [filename, zipEntry] of Object.entries(zipContent.files)) {
+          if (!zipEntry.dir && filename.match(/\.(jpe?g|png|gif|webp)$/i)) {
+            // Ignorer les dossiers système de macOS
+            if (filename.startsWith('__MACOSX/')) continue
+            
+            const blob = await zipEntry.async('blob')
+            const imageFile = new File([blob], filename.split('/').pop(), { type: `image/${filename.split('.').pop()}` })
+            imagesToProcess.push(imageFile)
+          }
+        }
+      } else if (file.type.startsWith('image/')) {
+        imagesToProcess.push(file)
+      }
+    }
+  } catch(e) {
+    progress(`Erreur lors de la préparation des images: ${e.message}`)
+    // Fallback si JSZip ne se charge pas, on utilise les images non-ZIP
+    imagesToProcess = Array.from(files).filter(f => f.type.startsWith('image/'))
+  }
+
+  progress(`${imagesToProcess.length} image(s) à importer...`)
+
+  for (let index = 0; index < imagesToProcess.length; index += 1) {
+    const file = imagesToProcess[index]
     const reference = getReferenceFromFilename(file.name)
     if (!reference) {
       progress(`Image "${file.name}": pas de référence détectée`)
       continue
     }
-    const productId = await findProductIdByReference(reference)
-    if (!productId) {
-      progress(`Image "${file.name}": produit non trouvé pour ref "${reference}"`)
-      continue
-    }
     try {
+      const productId = await findProductIdByReference(reference)
+      if (!productId) {
+        progress(`Image "${file.name}": produit non trouvé pour ref "${reference}"`)
+        continue
+      }
       await uploadProductImage(productId, file)
       progress(`Image "${file.name}": uploadée pour produit ${productId}`)
       success += 1
     } catch (error) {
-      progress(`Image "${file.name}": ERREUR — ${error.message}`)
+      progress(`Image "${file.name}": ERREUR — ${formatError(error)}`)
     }
   }
 
-  return { total: list.length, success }
+  return { total: imagesToProcess.length, success }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -301,7 +367,7 @@ async function ensureProductOptionValueId(groupId, name, cache) {
   return id
 }
 
-async function ensureCombinationId(productInfo, valueId, reference, karazany, salePrice, cache) {
+async function ensureCombinationId(productInfo, valueId, reference, karazany, priceImpact, cache) {
   const key = `${productInfo.id}:${valueId}`
   if (cache.has(key)) return cache.get(key)
   const existing = await findCombinationByProductAndValueId(productInfo.id, valueId)
@@ -309,7 +375,6 @@ async function ensureCombinationId(productInfo, valueId, reference, karazany, sa
     cache.set(key, existing.id)
     return existing.id
   }
-  const priceImpact = formatMoney(salePrice - productInfo.price)
   const combinationReference = `${reference}-${slugify(karazany)}`
   const id = await createCombinationForProduct({
     productId: productInfo.id,

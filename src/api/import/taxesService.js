@@ -110,3 +110,29 @@ export async function ensureTaxSystem(rateString, countryId = 8) {
 
   return { taxRulesGroupId: groupId, rate }
 }
+
+export async function getTaxRateByGroupId(groupId) {
+  if (!groupId || groupId === 0) return 0;
+  
+  try {
+    const rulesXml = await getXml('tax_rules', {
+      display: '[id_tax]',
+      'filter[id_tax_rules_group]': groupId,
+      limit: 1
+    })
+    const docR = parseXml(rulesXml)
+    const idTaxNode = docR.querySelector('tax_rule id_tax')
+    if (!idTaxNode) return 0;
+    const idTax = idTaxNode.textContent.trim()
+    
+    const taxXml = await getXml(`taxes/${idTax}`)
+    const docT = parseXml(taxXml)
+    const rateNode = docT.querySelector('tax rate')
+    if (!rateNode) return 0;
+    
+    return toFloat(rateNode.textContent, 0)
+  } catch(e) {
+    console.warn("[taxesService] Could not get tax rate", e)
+    return 0
+  }
+}

@@ -49,7 +49,7 @@ export function jsonToXml(data) {
 export function buildEntityXml(entityTag, data) {
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<prestashop>',
+    '<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">',
     `  <${entityTag}>`,
     `    ${jsonToXml(data)}`,
     `  </${entityTag}>`,

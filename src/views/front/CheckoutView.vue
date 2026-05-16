@@ -2,10 +2,10 @@
 import { reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCart } from '@/api/useCart'
-import { createCart, createOrder, getCartStatus, getOrderStatus, validateCheckoutData, getCustomerAddresses, calculateCartTaxes } from '@/api/useCheckout'
+import { createOrder, updateCart, getCustomerAddresses, calculateCartTaxes } from '@/api/useCheckout'
 
 const router = useRouter()
-const { items: cartItems, totalPrice, removeItem, updateQuantity, clearCart } = useCart()
+const { items: cartItems, totalPrice, cartId, syncing, removeItem, updateQuantity, clearCart } = useCart()
 
 const STEPS = { CART: 'cart', CUSTOMER: 'customer', PAYMENT: 'payment', CONFIRM: 'confirm', SUCCESS: 'success' }
 
@@ -18,12 +18,21 @@ const state = reactive({
   addresses: [],
   selectedAddressId: null,
   orderCreated: null,
-  cartId: null,
   taxAmount: 0,
 })
 
-const handleQuantityChange = (identifier, newQty) => {
-  newQty <= 0 ? removeItem(identifier) : updateQuantity(identifier, newQty)
+const localQuantities = reactive({})
+cartItems.value.forEach(item => {
+  localQuantities[item.id] = item.quantity
+})
+
+const handleQuantityChange = async (identifier) => {
+  const newQty = localQuantities[identifier]
+  if (newQty <= 0) {
+    await removeItem(identifier)
+  } else {
+    await updateQuantity(identifier, newQty)
+  }
 }
 
 const goToStep = async (step) => {
@@ -40,16 +49,17 @@ const goToStep = async (step) => {
   if (step === STEPS.CONFIRM) {
     state.loading = true
     try {
-      // Calcul des taxes
+      // Mettre à jour l'adresse du panier avec l'adresse sélectionnée
+      if (cartId.value && state.selectedAddressId) {
+        await updateCart(cartId.value, {
+          customerId: parseInt(state.customerId),
+          addressId: parseInt(state.selectedAddressId),
+          items: cartItems.value,
+        })
+      }
+      // Calcul des taxes (panier déjà synchronisé)
       const { totalTaxAmount } = await calculateCartTaxes(cartItems.value)
       state.taxAmount = totalTaxAmount
-
-      // Création du panier (abandonné si non validé)
-      state.cartId = await createCart({
-        customerId: parseInt(state.customerId),
-        addressId: parseInt(state.selectedAddressId),
-        items: cartItems.value.map(item => ({ id: item.id, combinationId: item.combinationId, name: item.name, price: item.price, quantity: item.quantity, id_tax_rules_group: item.id_tax_rules_group })),
-      })
     } catch (e) {
       state.error = "Erreur lors de la préparation de la commande : " + e.message
       state.loading = false
@@ -81,7 +91,7 @@ const submitOrder = async () => {
       customerId: parseInt(state.customerId),
       addressId: parseInt(state.selectedAddressId),
       paymentModule: state.paymentModule,
-      cartId: state.cartId,
+      cartId: cartId.value || 0,
       items: cartItems.value.map(item => ({ id: item.id, combinationId: item.combinationId, name: item.name, price: item.price, quantity: item.quantity })),
     })
     state.currentStep = STEPS.SUCCESS; clearCart()
@@ -109,7 +119,7 @@ const totalPriceTtc = computed(() => {
       </header>
 
       <div v-if="state.error" class="error-block"><p>{{ state.error }}</p></div>
-      <div v-if="state.loading" class="loading-state"><p>Traitement...</p></div>
+      <div v-if="state.loading || syncing" class="loading-state"><p>Traitement (synchronisation...)</p></div>
 
       <div v-else-if="state.currentStep === STEPS.CART" class="checkout-section">
         <h2>Panier</h2>
@@ -118,14 +128,18 @@ const totalPriceTtc = computed(() => {
           <div class="items-list">
             <div v-for="item in cartItems" :key="item.id" class="item-row">
               <div class="item-info"><h4>{{ item.name }}</h4></div>
-              <input v-model.number="item.quantity" type="number" min="1" @change="e => handleQuantityChange(item.id, parseInt(e.target.value))" class="qty-input" />
+              <div class="qty-control">
+                <input v-model.number="localQuantities[item.id]" type="number" min="1" class="qty-input" />
+                <button type="button" @click="handleQuantityChange(item.id)" class="button button--small button--ghost" title="Valider la quantité">✓</button>
+              </div>
               <div class="price">{{ (item.price * item.quantity).toFixed(2) }}€</div>
+              <button class="button button--danger button--small" @click="removeItem(item.id)">X</button>
             </div>
           </div>
           <div class="summary"><div><span>Total :</span><strong>{{ totalPrice }}€</strong></div></div>
           <div class="actions">
-            <button class="button button--ghost" @click="router.push({name: 'front-cart'})">← Retour</button>
-            <button class="button button--primary" @click="nextStep">Continuer →</button>
+            <button class="button button--danger" @click="clearCart" :disabled="syncing">Vider le panier</button>
+            <button class="button button--primary" @click="nextStep" :disabled="syncing">Continuer →</button>
           </div>
         </div>
       </div>

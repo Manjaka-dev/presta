@@ -5,8 +5,7 @@
 import { DEFAULT_LANG_ID } from './constants'
 import { createCustomer, findCustomerIdByEmail } from './customersService'
 import { createAddress } from './addressesService'
-import { createCart } from './cartsService'
-import { createOrder } from './ordersService'
+import { createOrder as createOrderEntity } from './ordersService'
 import { createOrderDetail } from './orderDetailsService'
 import { createOrderHistory } from './orderHistoriesService'
 import { findProductInfoByReference } from './productsService'
@@ -15,6 +14,7 @@ import { findCombinationByProductAndValueId } from './combinationsService'
 import { getXml } from './crud'
 import { toInt } from '@/utils/stringUtils'
 import { getText, parseXml } from '@/utils/xmlUtils'
+import { calculateCartTaxes, createCart as createCartFromCheckout } from '../useCheckout' // Importer la fonction de calcul de taxe et createCart
 
 export async function createOrderFromCsvRow(row, config) {
   const orderItems = parseOrderItems(row.achat)
@@ -35,10 +35,16 @@ export async function createOrderFromCsvRow(row, config) {
   }
 
   const cartId = await createCartForOrder(customerId, addressId, resolvedItems, config)
-  const totals = computeOrderTotals(resolvedItems)
+  
+  // S'il n'y a pas d'état, on s'arrête à la création du panier
+  if (!row.etat || row.etat.trim() === '') {
+    return `Panier ${cartId}` // On renvoie l'ID du panier
+  }
+
+  const totals = await computeOrderTotals(resolvedItems) // Await this async function
   const orderStateId = resolveOrderStateId(row.etat, config)
 
-  const orderId = await createOrder({
+  const orderId = await createOrderEntity({
     id_cart: cartId,
     id_currency: config.currencyId,
     id_lang: config.langId,
@@ -54,26 +60,31 @@ export async function createOrderFromCsvRow(row, config) {
     total_paid: totals.totalPaid,
     total_paid_real: totals.totalPaid,
     total_paid_tax_incl: totals.totalPaid,
-    total_paid_tax_excl: totals.totalPaid,
-    total_products: totals.totalProducts,
-    total_products_wt: totals.totalProducts,
-    total_discounts: totals.totalDiscounts,
-    total_discounts_tax_incl: totals.totalDiscounts,
-    total_discounts_tax_excl: totals.totalDiscounts,
-    total_shipping: totals.totalShipping,
-    total_shipping_tax_incl: totals.totalShipping,
-    total_shipping_tax_excl: totals.totalShipping,
-    total_wrapping: totals.totalWrapping,
-    total_wrapping_tax_incl: totals.totalWrapping,
-    total_wrapping_tax_excl: totals.totalWrapping,
+    total_paid_tax_excl: totals.totalProducts, // HT
+    total_products: totals.totalProducts, // HT
+    total_products_wt: totals.totalPaid, // TTC
+    total_discounts: "0.00",
+    total_discounts_tax_incl: "0.00",
+    total_discounts_tax_excl: "0.00",
+    total_shipping: "0.00",
+    total_shipping_tax_incl: "0.00",
+    total_shipping_tax_excl: "0.00",
+    total_wrapping: "0.00",
+    total_wrapping_tax_incl: "0.00",
+    total_wrapping_tax_excl: "0.00",
     secure_key: secureKey,
     conversion_rate: 1
   })
 
-  for (const item of resolvedItems) {
+  const { itemsWithTax } = await calculateCartTaxes(resolvedItems)
+
+  for (const item of itemsWithTax) {
     const lineName = item.karazany ? `${item.name} (${item.karazany})` : item.name
-    const unitPrice = formatMoney(item.price)
-    const lineTotal = formatMoney(item.price * item.quantity)
+    const unitPriceHT = formatMoney(item.price)
+    const unitPriceTTC = formatMoney(item.price * (1 + item.taxRate / 100))
+    const lineTotalHT = formatMoney(item.price * item.quantity)
+    const lineTotalTTC = formatMoney((item.price * (1 + item.taxRate / 100)) * item.quantity)
+
     await createOrderDetail({
       id_order: orderId,
       product_id: item.id,
@@ -81,11 +92,11 @@ export async function createOrderFromCsvRow(row, config) {
       product_name: lineName,
       product_reference: item.reference,
       product_quantity: item.quantity,
-      product_price: unitPrice,
-      unit_price_tax_incl: unitPrice,
-      unit_price_tax_excl: unitPrice,
-      total_price_tax_incl: lineTotal,
-      total_price_tax_excl: lineTotal,
+      product_price: unitPriceHT,
+      unit_price_tax_incl: unitPriceTTC,
+      unit_price_tax_excl: unitPriceHT,
+      total_price_tax_incl: lineTotalTTC,
+      total_price_tax_excl: lineTotalHT,
       id_warehouse: config.warehouseId,
       id_shop: config.shopId
     })
@@ -98,7 +109,7 @@ export async function createOrderFromCsvRow(row, config) {
     })
   }
 
-  return orderId
+  return `Commande ${orderId}`
 }
 
 export function buildOrderConfig() {
@@ -223,45 +234,40 @@ async function resolveOrderItems(items) {
       reference: item.reference,
       quantity: item.quantity,
       karazany: item.karazany,
-      productAttributeId
+      productAttributeId,
+      id_tax_rules_group: info.id_tax_rules_group || 0
     })
   }
   return resolved
 }
 
 async function createCartForOrder(customerId, addressId, items, config) {
-  const cartRows = items.map((item) => ({
-    id_product: item.id,
-    id_product_attribute: item.productAttributeId || 0,
-    id_address_delivery: addressId,
-    quantity: item.quantity
-  }))
+  const cartData = {
+    customerId: customerId,
+    addressId: addressId,
+    idCurrency: config.currencyId,
+    idLang: config.langId,
+    items: items.map(item => ({
+      id: item.id,
+      combinationId: item.productAttributeId || 0,
+      quantity: item.quantity
+    }))
+  }
 
-  return createCart({
-    id_customer: customerId,
-    id_address_delivery: addressId,
-    id_address_invoice: addressId,
-    id_currency: config.currencyId,
-    id_lang: config.langId,
-    id_shop: config.shopId,
-    id_shop_group: config.shopGroupId,
-    associations: {
-      cart_rows: {
-        cart_row: cartRows
-      }
-    }
-  })
+  // Utiliser la fonction robuste de useCheckout qui crée puis patch le panier avec nodeType
+  const cartId = await createCartFromCheckout(cartData)
+
+  return cartId
 }
 
-function computeOrderTotals(items) {
-  const totalProductsValue = items.reduce((sum, item) => sum + item.price * item.quantity, 0)
-  const totalProducts = formatMoney(totalProductsValue)
+async function computeOrderTotals(items) {
+  const totalProductsHT = items.reduce((sum, item) => sum + item.price * item.quantity, 0)
+  const { totalTaxAmount } = await calculateCartTaxes(items)
+  const totalPaidTTC = totalProductsHT + totalTaxAmount
+  
   return {
-    totalProducts,
-    totalPaid: totalProducts,
-    totalDiscounts: formatMoney(0),
-    totalShipping: formatMoney(0),
-    totalWrapping: formatMoney(0)
+    totalProducts: formatMoney(totalProductsHT),
+    totalPaid: formatMoney(totalPaidTTC),
   }
 }
 
@@ -274,8 +280,9 @@ function formatMoney(value) {
 function resolveOrderStateId(status, config) {
   const normalized = String(status || '').trim().toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-  if (normalized.includes('accepte')) return config.orderStatePaidId
+  if (normalized.includes('accepte') || normalized.includes('effectue')) return config.orderStatePaidId
   if (normalized.includes('erreur')) return config.orderStateErrorId
+  if (normalized.includes('annul')) return 6 // default PS cancelled state is 6
   return config.orderStatePendingId
 }
 

@@ -2,11 +2,11 @@
 import { reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCart } from '@/api/useCart'
-import { createOrder, createCart as createPrestaCart, validateCheckoutData } from '@/api/useCheckout'
+import { createOrder, createCart, validateCheckoutData } from '@/api/useCheckout'
 import { useCustomer } from '@/api/customerIdentity'
 
 const router = useRouter()
-const { items, totalPrice, removeItem, updateQuantity, clearCart } = useCart()
+const { items, totalPrice, cartId, syncing, removeItem, updateQuantity, clearCart } = useCart()
 const { customer, loadCustomer } = useCustomer()
 
 const state = reactive({
@@ -50,9 +50,9 @@ const placeOrder = async () => {
 
     const checkoutData = {
       customerId: customer.value.id,
-      addressId: customer.value.addressId || 1, // Fallback to a default address if needed
+      addressId: customer.value.addressId || 1,
       items: items.value,
-      paymentModule: 'ps_checkpayment', // Example module for COD
+      paymentModule: 'ps_cashondelivery',
     }
 
     const { isValid, errors } = await validateCheckoutData(checkoutData)
@@ -60,13 +60,16 @@ const placeOrder = async () => {
       throw new Error(errors.join(', '))
     }
 
-    // Create cart in PrestaShop first
-    const cartId = await createPrestaCart({
+    // Créer un nouveau panier "frais" au moment de la commande
+    // (les paniers pré-créés peuvent être rejetés par PrestaShop à cause de la session PHP)
+    const freshCartId = await createCart({
       customerId: checkoutData.customerId,
-      items: checkoutData.items
+      addressId: checkoutData.addressId,
+      items: checkoutData.items,
     })
 
-    checkoutData.cartId = cartId;
+    checkoutData.cartId = freshCartId
+    checkoutData.statusId = 2 // Paiement effectué
 
     const result = await createOrder(checkoutData)
     if (result.success) {

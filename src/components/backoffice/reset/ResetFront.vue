@@ -4,29 +4,27 @@ import { resourceApi } from '@/api/resources'
 import { processQueue, retry } from '@/utils/asyncQueue.js'
 import { extractItems } from '@/utils/resourceData.js'
 
+// We only reset resources that we import/recreate
 const RESOURCES_TO_RESET = [
-  // Commandes et dérivées (à supprimer en premier)
+  // Orders & related
   { key: 'order_details', label: 'Order Details', deletable: true },
   { key: 'order_histories', label: 'Order Histories', deletable: true },
-  { key: 'order_invoices', label: 'Order Invoices', deletable: true },
-  { key: 'order_payments', label: 'Order Payments', deletable: true },
-  { key: 'order_slip', label: 'Order Slip', deletable: true },
-  { key: 'order_cart_rules', label: 'Order Cart Rules', deletable: true },
-  { key: 'order_carriers', label: 'Order Carriers', deletable: true },
   { key: 'orders', label: 'Orders', deletable: true },
-  // Clients et paniers
-  { key: 'customers', label: 'Customers', deletable: true },
+  // Carts & related
   { key: 'carts', label: 'Carts', deletable: true },
-  // Produits et variantes
+  { key: 'addresses', label: 'Addresses', deletable: true },
+  { key: 'customers', label: 'Customers', deletable: true },
+  // Products & Stock
   { key: 'combinations', label: 'Combinations', deletable: true },
   { key: 'product_option_values', label: 'Product Option Values', deletable: true },
   { key: 'product_options', label: 'Product Options', deletable: true },
   { key: 'products', label: 'Products', deletable: true },
-  // Catégories et taxes
-  { key: 'categories', label: 'Categories', deletable: true },
-  { key: 'taxes', label: 'Taxes', deletable: true },
+  // Categories
+  { key: 'categories', label: 'Categories', deletable: true, protectIds: [1, 2] },
+  // Taxes
   { key: 'tax_rules', label: 'Tax Rules', deletable: true },
   { key: 'tax_rule_groups', label: 'Tax Rule Groups', deletable: true },
+  { key: 'taxes', label: 'Taxes', deletable: true },
 ]
 
 const state = reactive({
@@ -47,11 +45,18 @@ const stats = reactive({
 
 const resetResource = async (resourceDef) => {
   const api = resourceApi(resourceDef.key)
-  const data = await api.list({ display: '[id]' })
+  const data = await api.list({ display: '[id]', limit: 1000 })
   const items = extractItems(data, api.resource)
-  const ids = items
+
+  let ids = items
 	.map((item) => item.id || item[api.resource.key])
 	.filter((value) => value !== undefined && value !== null)
+    .map((value) => parseInt(value, 10))
+
+  // Protection des IDs critiques (ex: Root Category = 1, Home Category = 2)
+  if (resourceDef.protectIds) {
+    ids = ids.filter(id => !resourceDef.protectIds.includes(id))
+  }
 
   if (!ids.length) {
 	state.skipped += 1
@@ -87,11 +92,6 @@ const resetResource = async (resourceDef) => {
 	resource: resourceDef.key,
 	ids: ids.length,
   })
-
-  const worker = async (id) => {
-	await retry(() => api.remove(id), 3, 1000)
-	state.success += 1
-  }
 
   let localFailed = 0
   const queueWorker = async (id) => {

@@ -20,7 +20,7 @@ export async function findCategoryIdByName(name) {
   }
   const xml = await getXml('categories', {
     display: '[id]',
-    'filter[name]': name
+    'filter[name]': `[${name}]`
   })
   const doc = parseXml(xml)
   const ids = extractIdsByTag(doc, 'category')
@@ -36,12 +36,17 @@ function buildCategoryPayload(data, langId) {
   const active = data.active === false ? 0 : 1
   const parentId = data.parentId ?? DEFAULT_CATEGORY_ID
 
-  return {
+  const payload = {
     id: data.id,
     id_parent: parentId,
     active,
     name: langField(name, langId),
     link_rewrite: langField(linkRewrite, langId),
-    description: langField(description, langId)
   }
+  
+  if (description) {
+    payload.description = langField(description, langId)
+  }
+  
+  return payload
 }
