@@ -129,6 +129,20 @@ export const useCart = () => {
   const totalPrice = ref('0.00')
 
   const recalculateTotals = async () => {
+    if (cartState.cartId) {
+      try {
+        // Récupérer les détails du panier depuis l'API pour un calcul précis
+        const { items: apiItems } = await getCartDetails(cartState.cartId)
+        const sub = apiItems.reduce((s, i) => s + (parseFloat(i.price) || 0) * (parseInt(i.quantity) || 0), 0)
+        const { totalTaxAmount } = await calculateCartTaxes(apiItems)
+        totalPrice.value = (sub + totalTaxAmount).toFixed(2)
+        return
+      } catch (e) {
+        console.warn("[useCart] Erreur lors du calcul des totaux via API, fallback sur local:", e.message)
+        // Fallback si l'API échoue
+      }
+    }
+    // Calcul local si pas de cartId ou si l'API a échoué
     const sub = cartState.items.reduce((s, i) => s + (parseFloat(i.price) || 0) * (parseInt(i.quantity) || 0), 0)
     try {
       const { totalTaxAmount } = await calculateCartTaxes(cartState.items)
@@ -139,6 +153,7 @@ export const useCart = () => {
   }
 
   watch(() => cartState.items, recalculateTotals, { deep: true, immediate: true })
+  watch(() => cartState.cartId, recalculateTotals, { immediate: true }) // Recalculer si le cartId change
 
   const addItem = async (product, quantity = 1, maxQuantity = null) => {
     const itemKey = product.itemKey || `${product.id}${product.combinationId ? `:${product.combinationId}` : ''}`

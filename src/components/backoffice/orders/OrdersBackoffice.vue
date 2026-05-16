@@ -2,7 +2,7 @@
 import { reactive } from 'vue'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
-import { createOrder, deleteOrder, getCartDetails } from '@/api/useCheckout'
+import { createOrder, deleteOrder, getCartDetails, calculateCartTotal } from '@/api/useCheckout'
 
 // Tous les statuts disponibles
 const EDITABLE_STATUSES = reactive({})
@@ -151,6 +151,15 @@ const loadOrders = async () => {
         type: 'cart',
       }))
 
+    const cartTotalPromises = cartOrders.map(cartOrder =>
+        calculateCartTotal(cartOrder.cartId).then(total => {
+          cartOrder.total = total; // Mettre à jour le total
+        })
+    );
+
+    await Promise.all(cartTotalPromises);
+
+
     state.orders = [...orders, ...cartOrders].sort((a, b) => new Date(b.date) - new Date(a.date))
     state.total = state.orders.length
     console.info('[OrdersBackoffice] loaded', { orders: orders.length, carts: cartOrders.length })
@@ -283,7 +292,7 @@ init()
 
       <div v-for="order in state.orders" :key="order.id" class="orders-list__row" :class="order.type === 'cart' ? 'row--cart' : ''">
         <div class="col--id">
-          {{ order.type === 'cart' ? `🛒 #${order.cartId}` : `#${order.id}` }}
+          {{ order.type === 'cart' ? ` #${order.cartId}` : `#${order.id}` }}
         </div>
         <div class="col--customer">{{ order.customer }}</div>
         <div class="col--total">{{ parseFloat(order.total).toFixed(2) }}€</div>
@@ -304,7 +313,7 @@ init()
           </template>
           <template v-else>
             <span class="status-badge" :class="order.statusId === 'cart' ? 'status-cart' : `status-${order.statusId}`">
-              {{ order.statusId === 'cart' ? '🛒 dans le panier' : getStatusLabel(order.statusId) }}
+              {{ order.statusId === 'cart' ? ' dans le panier' : getStatusLabel(order.statusId) }}
             </span>
           </template>
         </div>

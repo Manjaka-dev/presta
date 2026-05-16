@@ -1,5 +1,10 @@
 import { resourceApi } from '@/api/resources'
-import { extractItems } from '@/utils/resourceData.js'
+import { extractItems, extractSingleItem } from '@/utils/resourceData.js'
+
+// --- Fonctions d'extraction de données ---
+
+// Note: extractItems n'est pas défini ici car il est importé et correct.
+
 
 // --- Fonctions de calcul de taxe ---
 
@@ -35,23 +40,32 @@ export const calculateCartTaxes = async (items) => {
   }
 }
 
-const getTaxInfoForItem = (item, taxRules, taxes) => {
-  const groupId = item.id_tax_rules_group
+/**
+ * Helper pour trouver le bon taux de taxe pour un item donné.
+ * @param {object} item - L'objet item (doit contenir id_tax_rules_group).
+ * @param {array} taxRules - La liste des règles de taxes (depuis l'API).
+ * @param {array} taxes - La liste des taxes (depuis l'API).
+ * @returns {{rate: number, name: string}} L'information sur la taxe.
+ */
+function getTaxInfoForItem(item, taxRules, taxes) {
+  const groupId = item.id_tax_rules_group;
   if (!groupId || groupId === '0' || !taxRules || !taxes) {
-    return { rate: 0, name: 'No Tax' }
+    return { rate: 0, name: 'No Tax' };
   }
 
-  const taxRule = taxRules.find(tr => String(tr.id_tax_rules_group) === String(groupId))
+  // Trouver la règle qui s'applique à ce groupe de taxe
+  const taxRule = taxRules.find(tr => String(tr.id_tax_rules_group) === String(groupId));
   if (!taxRule) {
-    return { rate: 0, name: 'No Rule' }
+    return { rate: 0, name: 'No Rule' };
   }
 
-  const tax = taxes.find(t => String(t.id) === String(taxRule.id_tax))
+  // Utiliser l'ID de la taxe de cette règle pour trouver le taux
+  const tax = taxes.find(t => String(t.id) === String(taxRule.id_tax));
   if (tax) {
-    return { rate: parseFloat(tax.rate || 0), name: tax.name || 'Tax' }
+    return { rate: parseFloat(tax.rate || 0), name: tax.name || 'Tax' };
   }
 
-  return { rate: 0, name: 'Tax not found' }
+  return { rate: 0, name: 'Tax not found' };
 }
 
 // --- Fonctions de création de Panier et Commande ---
@@ -99,29 +113,29 @@ const buildCartXml = (cartData) => {
 
 export const createCart = async (cartData) => {
   const api = resourceApi('carts')
-  
+
   // Créer directement le panier AVEC les articles en un seul appel POST.
   // C'est beaucoup plus simple et souvent plus fiable avec l'API PrestaShop.
   const xml = buildCartXml(cartData)
   const response = await api.create(xml)
-  
-  const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
+
+  const match = response.match(/<id>[^0-9*(\d+)[^0-9]*<\/id>/i)
   if (!match) throw new Error('Could not get cart ID from response')
-  
+
   const cartId = parseInt(match[1])
-  
+
   return cartId
 }
 
 export const updateCart = async (cartId, cartData) => {
   if (!cartId) throw new Error('cartId is required for updateCart')
   const api = resourceApi('carts')
-  
+
   // Reconstruire le XML complet avec les nouvelles données (y compris les items)
   // et envoyer directement en PUT.
   const fullCartData = { ...cartData, id: cartId }
   const updateXml = buildCartXml(fullCartData)
-  
+
   await api.update(cartId, updateXml)
   console.info('[useCheckout] Cart updated', { cartId })
   return true
@@ -183,7 +197,7 @@ export const createOrder = async (checkoutData) => {
   // 1. Récupérer la secure_key du client
   const customerApi = resourceApi('customers')
   const customerRes = await customerApi.get(checkoutData.customerId)
-  
+
   let secureKey = ''
   const customerObj = customerRes?.customer || customerRes?.customers?.[0] || customerRes?.prestashop?.customer
   if (customerObj) {
@@ -193,7 +207,7 @@ export const createOrder = async (checkoutData) => {
           secureKey = Object.values(customerObj.secure_key)[0]
       }
   } else if (customerRes?.__raw) {
-      const match = customerRes.__raw.match(/<secure_key>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/secure_key>/)
+      const match = customerRes.__raw.match(/<secure_key>(?:<!\[CDATA\[)?(.*?)(?:\\]>)?<\/secure_key>/)
       if (match) secureKey = match[1]
   }
 
@@ -206,7 +220,7 @@ export const createOrder = async (checkoutData) => {
   const orderXml = await buildOrderXml({ ...checkoutData, secureKey })
   const orderApi = resourceApi('orders')
   const orderResponse = await orderApi.create(orderXml)
-  
+
   const orderIdMatch = orderResponse.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
   if (!orderIdMatch) throw new Error('Could not get order ID from response')
   const orderId = parseInt(orderIdMatch[1])
@@ -251,7 +265,7 @@ export const validateCheckoutData = async (checkoutData) => {
   if (!checkoutData.items || checkoutData.items.length === 0) {
     errors.push('Panier vide')
   }
-  
+
   return {
     isValid: errors.length === 0,
     errors,
@@ -273,39 +287,43 @@ export const getCustomerAddresses = async (customerId) => {
 
 export const getCartDetails = async (cartId) => {
   try {
-    const api = resourceApi('carts')
-    const r = await api.get(cartId)
-    const cartItems = extractItems(r?.prestashop?.cart?.associations?.cart_rows, 'cart_row')
-    
+    const api = resourceApi('carts');
+
+    // CORRECTION : Ajout de { display: 'full' } pour forcer l'API à renvoyer les associations.
+    const r = await api.get(cartId, { display: 'full' });
+
+    const cartData = extractSingleItem(r, api.resource);
+    const cartItems = cartData?.associations?.cart_rows || [];
+
     if (!cartItems || cartItems.length === 0) {
-      return { items: [], customerId: r?.prestashop?.cart?.id_customer || 0, addressId: r?.prestashop?.cart?.id_address_delivery || 0 }
+      return { items: [], customerId: cartData?.id_customer || 0, addressId: cartData?.id_address_delivery || 0 };
     }
 
-    const productIds = cartItems.map(i => i.id_product).filter(Boolean).join('|')
-    let products = []
+    const productIds = cartItems.map(i => i.id_product).filter(Boolean).join('|');
+    let products = [];
     if (productIds) {
-      const pApi = resourceApi('products')
-      const pRes = await pApi.list({ display: 'full', 'filter[id]': `[${productIds}]` })
-      products = extractItems(pRes, pApi.resource)
+      const pApi = resourceApi('products');
+      const pRes = await pApi.list({ display: 'full', 'filter[id]': `[${productIds}]` });
+      products = extractItems(pRes, pApi.resource);
     }
 
-    const comboIds = cartItems.map(i => i.id_product_attribute).filter(id => id && id !== '0').join('|')
-    let combinations = []
+    const comboIds = cartItems.map(i => i.id_product_attribute).filter(id => id && id !== '0').join('|');
+    let combinations = [];
     if (comboIds) {
-      const cApi = resourceApi('combinations')
-      const cRes = await cApi.list({ display: '[id,price]', 'filter[id]': `[${comboIds}]` }).catch(() => null)
-      if (cRes) combinations = extractItems(cRes, cApi.resource)
+      const cApi = resourceApi('combinations');
+      const cRes = await cApi.list({ display: '[id,price]', 'filter[id]': `[${comboIds}]` }).catch(() => null);
+      if (cRes) combinations = extractItems(cRes, cApi.resource);
     }
 
     const items = cartItems.map(item => {
-      const p = products.find(p => String(p.id) === String(item.id_product))
-      const priceHT = (p && p.price) ? (parseFloat(String(p.price).replace(',', '.')) || 0) : 0
-      
-      let comboImpact = 0
+      const p = products.find(p => String(p.id) === String(item.id_product));
+      const priceHT = (p && p.price) ? (parseFloat(String(p.price).replace(',', '.')) || 0) : 0;
+
+      let comboImpact = 0;
       if (item.id_product_attribute && item.id_product_attribute !== '0') {
-         const combo = combinations.find(c => String(c.id) === String(item.id_product_attribute))
+         const combo = combinations.find(c => String(c.id) === String(item.id_product_attribute));
          if (combo && combo.price) {
-            comboImpact = parseFloat(String(combo.price).replace(',', '.')) || 0
+            comboImpact = parseFloat(String(combo.price).replace(',', '.')) || 0;
          }
       }
 
@@ -313,31 +331,30 @@ export const getCartDetails = async (cartId) => {
         id: item.id_product,
         combinationId: item.id_product_attribute,
         quantity: parseInt(item.quantity || 1, 10),
-        price: priceHT + comboImpact, // Le prix est toujours HT ici
+        price: priceHT + comboImpact, // Le prix HT final (base + impact)
         name: p ? (extractItems(p.name, 'language')[0] || `Produit #${item.id_product}`) : `Produit #${item.id_product}`,
         id_tax_rules_group: p ? p.id_tax_rules_group : 0
-      }
-    })
-
-    return { 
-      items, 
-      customerId: r?.prestashop?.cart?.id_customer || 0,
-      addressId: r?.prestashop?.cart?.id_address_delivery || 0 
-    }
+      };
+    });
+    return {
+      items,
+      customerId: cartData?.id_customer || 0,
+      addressId: cartData?.id_address_delivery || 0
+    };
   } catch (e) {
-    console.error(`[useCheckout] Erreur chargement panier ${cartId}`, e)
-    return { items: [], customerId: 0, addressId: 0 }
+    console.error(`[useCheckout] Erreur chargement panier ${cartId}`, e);
+    return { items: [], customerId: 0, addressId: 0 };
   }
 }
 
 // Supprime une commande avec cascade (order_details, order_histories)
 export const deleteOrder = async (orderId) => {
   if (!orderId) throw new Error('orderId is required')
-  
+
   // 1. Supprimer les lignes de commande (order_details)
   try {
     const detailsApi = resourceApi('order_details')
-    const dRes = await detailsApi.list({ 'filter[id_order]': `[${orderId}]`, display: '[id]' })
+    const dRes = await detailsApi.list({ 'filter[id_order]': `[${orderId}]`, display: '[id' })
     const details = extractItems(dRes, detailsApi.resource)
     await Promise.allSettled(details.map(d => detailsApi.remove(d.id)))
   } catch (e) {
@@ -358,4 +375,61 @@ export const deleteOrder = async (orderId) => {
   const orderApi = resourceApi('orders')
   await orderApi.remove(orderId)
   console.info(`[deleteOrder] Order ${orderId} deleted with cascade`)
+}
+
+/**
+ * Calcule le montant total TTC d'un panier en utilisant les vraies données
+ * de produits, déclinaisons et taxes.
+ * @param {string|number} cartId - L'ID du panier à calculer.
+ * @returns {Promise<number>} Le montant total TTC du panier.
+ */
+export async function calculateCartTotal(cartId) {
+  if (!cartId) return 0;
+
+  try {
+    // 1. Récupérer les détails complets du panier (produits, prix HT, impact déclinaison)
+    // La fonction getCartDetails fait déjà 90% du travail pour nous.
+    const { items } = await getCartDetails(cartId);
+
+    if (!items || items.length === 0) {
+      return 0; // Panier vide
+    }
+
+    // 2. Charger les taxes et les règles de taxes (avec mise en cache)
+    // On ne fait ces appels API qu'une seule fois.
+    if (!cachedTaxes) {
+      const taxesApi = resourceApi('taxes');
+      const tRes = await taxesApi.list({ display: '[id,rate,name]' });
+      cachedTaxes = extractItems(tRes, taxesApi.resource);
+    }
+
+    if (!cachedTaxRules) {
+      const rulesApi = resourceApi('tax_rules');
+      const rRes = await rulesApi.list({ display: '[id_tax_rules_group,id_tax]' });
+      cachedTaxRules = extractItems(rRes, rulesApi.resource);
+    }
+
+    // 3. Calculer le total ligne par ligne
+    let totalTTC = 0;
+    for (const item of items) {
+      // Le prix HT (produit de base + impact déclinaison) est déjà calculé par getCartDetails
+      const priceHT = parseFloat(item.price);
+      const quantity = parseInt(item.quantity, 10);
+
+      // Trouver le taux de taxe pour cet item
+      const taxInfo = getTaxInfoForItem(item, cachedTaxRules, cachedTaxes);
+      const taxRate = parseFloat(taxInfo.rate) / 100; // ex: 20 -> 0.20
+
+      // Calculer le prix TTC pour cette ligne
+      const lineTotalTTC = (priceHT * (1 + taxRate)) * quantity;
+
+      totalTTC += lineTotalTTC;
+    }
+
+    return parseFloat(totalTTC.toFixed(2)); // Retourner une valeur propre avec 2 décimales
+
+  } catch (error) {
+    console.error(`[calculateCartTotal] Erreur lors du calcul réel du panier ${cartId}:`, error);
+    return 0; // En cas d'erreur, retourner 0 pour ne pas bloquer l'interface
+  }
 }
