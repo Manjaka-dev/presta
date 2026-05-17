@@ -45,10 +45,11 @@ export async function createOrderFromCsvRow(row, config) {
   }
 
   const cartId = await createCartForOrder(customerId, addressId, resolvedItems, config)
-  
-  // S'il n'y a pas d'état, on s'arrête à la création du panier
-  if (!row.etat || row.etat.trim() === '') {
-    return `Panier ${cartId}` // On renvoie l'ID du panier
+
+  const normalizedEtat = String(row.etat || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+
+  if (!normalizedEtat || normalizedEtat.includes('panier')) {
+    return `Panier ${cartId}` // On s'arrête ici, la commande n'est pas créée !
   }
 
   const totals = await computeOrderTotals(resolvedItems) // Await this async function
