@@ -3,7 +3,7 @@ const DEFAULT_METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head']
 const METHOD_LIMITS = {
   search: ['get', 'head'],
   stock_availables: ['get', 'put', 'patch', 'head'],
-  stock_movements: ['get', 'head'],
+  stock_movements: ['get', 'post', 'put', 'patch', 'delete', 'head'],
   stocks: ['get', 'head'],
   supply_order_details: ['get', 'head'],
   supply_order_histories: ['get', 'head'],
