@@ -8,7 +8,8 @@ const pad = (n) => String(n).padStart(2, '0')
 const formatDate = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
 
 const state = reactive({
-  // Stats journalières
+  // Stats journalières (qui est maintenant "Jour choisi")
+  selectedDay: formatDate(today),
   todayOrders: 0,
   todayTotal: 0,
   loadingToday: false,
@@ -54,17 +55,18 @@ const getPeriodDates = () => {
 const loadToday = async () => {
   state.loadingToday = true
   try {
-    const todayStr = formatDate(today)
+    const todayStr = state.selectedDay
     const api = resourceApi('orders')
     const res = await api.list({
       display: '[id,total_paid,date_add]',
-      date: 1, // Sort by date_add
+      'filter[date_add]': `[${todayStr} 00:00:00,${todayStr} 23:59:59]`,
+      date: 1, // Filter by date array requires date=1 flag
       limit: 1000,
     })
     const items = extractItems(res, api.resource)
-    const todayItems = items.filter(o => o.date_add && o.date_add.startsWith(todayStr))
-    state.todayOrders = todayItems.length
-    state.todayTotal = todayItems.reduce((s, o) => s + (parseFloat(o.total_paid) || 0), 0)
+
+    state.todayOrders = items.length
+    state.todayTotal = items.reduce((s, o) => s + (parseFloat(o.total_paid) || 0), 0)
   } catch (e) {
     console.error('[Dashboard] Erreur stats journalières', e)
   } finally {
@@ -80,17 +82,14 @@ const loadPeriod = async () => {
     const api = resourceApi('orders')
     const res = await api.list({
       display: '[id,total_paid,date_add]',
-      date: 1, // Sort by date_add
+      'filter[date_add]': `[${start} 00:00:00,${end} 23:59:59]`,
+      date: 1,
       limit: 1000,
     })
     const items = extractItems(res, api.resource)
-    const periodItems = items.filter(o => {
-      if (!o.date_add) return false
-      const orderDate = o.date_add.substring(0, 10)
-      return orderDate >= start && orderDate <= end
-    })
-    state.periodOrders = periodItems.length
-    state.periodTotal = periodItems.reduce((s, o) => s + (parseFloat(o.total_paid) || 0), 0)
+
+    state.periodOrders = items.length
+    state.periodTotal = items.reduce((s, o) => s + (parseFloat(o.total_paid) || 0), 0)
   } catch (e) {
     state.error = e.message || 'Erreur de chargement'
     console.error('[Dashboard] Erreur stats période', e)
@@ -102,6 +101,7 @@ const loadPeriod = async () => {
 const fmtEur = (n) => n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
 
 watch(() => state.period, loadPeriod)
+watch(() => state.selectedDay, loadToday)
 
 loadToday()
 loadPeriod()
@@ -114,9 +114,15 @@ loadPeriod()
       <p class="muted">Vue d'ensemble des ventes</p>
     </header>
 
-    <!-- Stats Aujourd'hui -->
+    <!-- Stats d'un jour spécifique -->
     <div class="stats-section">
-      <h2 class="section-title">Aujourd'hui — {{ new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }) }}</h2>
+      <div class="section-header-flex">
+          <h2 class="section-title">Aperçu Journalier</h2>
+          <label class="date-selector">
+              Jour : <input type="date" v-model="state.selectedDay" class="date-input" />
+          </label>
+      </div>
+
       <div v-if="state.loadingToday" class="loading-block">Chargement…</div>
       <div v-else class="kpi-grid">
         <div class="kpi-card kpi-card--blue">
@@ -186,7 +192,9 @@ loadPeriod()
 .muted { color: #6b7280; margin: 0.25rem 0 0; }
 
 .stats-section { margin-bottom: 2.5rem; }
-.section-title { font-size: 1.2rem; font-weight: 600; color: #374151; margin: 0 0 1rem; }
+.section-header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 1rem; }
+.section-title { font-size: 1.2rem; font-weight: 600; color: #374151; margin: 0; }
+.date-selector { display: flex; align-items: center; gap: 0.5rem; font-size: 0.95rem; font-weight: 500; }
 
 .kpi-grid {
   display: grid;

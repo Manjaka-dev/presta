@@ -5,7 +5,7 @@
 import { DEFAULT_LANG_ID } from './constants'
 import { createCustomer, findCustomerIdByEmail } from './customersService'
 import { createAddress } from './addressesService'
-import { createOrder as createOrderEntity } from './ordersService'
+import { createOrder as createOrderEntity, updateOrderDate } from './ordersService'
 import { createOrderDetail } from './orderDetailsService'
 import { createOrderHistory } from './orderHistoriesService'
 import { findProductInfoByReference } from './productsService'
@@ -15,6 +15,16 @@ import { getXml } from './crud'
 import { toInt } from '@/utils/stringUtils'
 import { getText, parseXml } from '@/utils/xmlUtils'
 import { calculateCartTaxes, createCart as createCartFromCheckout } from '../useCheckout' // Importer la fonction de calcul de taxe et createCart
+import { createStockMovement } from '../stockService'
+
+function toIsoDateTime(raw) {
+  if (!raw) return null
+  const parts = raw.split('/')
+  if (parts.length !== 3) return null
+  const [day, month, year] = parts
+  if (!day || !month || !year) return null
+  return `${year.padStart(4, '0')}-${month.padStart(2, '0')}-${day.padStart(2, '0')} 12:00:00`
+}
 
 export async function createOrderFromCsvRow(row, config) {
   const orderItems = parseOrderItems(row.achat)
@@ -43,6 +53,8 @@ export async function createOrderFromCsvRow(row, config) {
 
   const totals = await computeOrderTotals(resolvedItems) // Await this async function
   const orderStateId = resolveOrderStateId(row.etat, config)
+  
+  const orderDate = toIsoDateTime(row.date) || new Date().toISOString().slice(0, 19).replace('T', ' ')
 
   const orderId = await createOrderEntity({
     id_cart: cartId,
@@ -54,7 +66,7 @@ export async function createOrderFromCsvRow(row, config) {
     id_carrier: config.carrierId,
     id_shop: config.shopId,
     id_shop_group: config.shopGroupId,
-    current_state: orderStateId,
+    current_state: orderStateId, // Créé à l'état cible directement
     payment: 'Paiement a la livraison',
     module: config.cashModule,
     total_paid: totals.totalPaid,
@@ -73,8 +85,21 @@ export async function createOrderFromCsvRow(row, config) {
     total_wrapping_tax_incl: "0.00",
     total_wrapping_tax_excl: "0.00",
     secure_key: secureKey,
-    conversion_rate: 1
+    conversion_rate: 1,
+    date_add: orderDate,
+    date_upd: orderDate
   })
+
+  // Patch: PrestaShop n'autorise parfois pas de forcer la date de création lors du POST (création) 
+  // car le constructeur d'ObjectModel la force. On tente un PUT pour forcer la date
+  if (row.date) {
+      try {
+          await updateOrderDate(orderId, orderDate)
+      } catch(e) {
+          console.warn(`[commandeService] Impossible de patcher la date pour la commande ${orderId}`, e)
+      }
+  }
+
 
   const { itemsWithTax } = await calculateCartTaxes(resolvedItems)
 
@@ -100,14 +125,27 @@ export async function createOrderFromCsvRow(row, config) {
       id_warehouse: config.warehouseId,
       id_shop: config.shopId
     })
+    
+    // Décrémenter le stock manuellement
+    try {
+        await createStockMovement({
+            productId: item.id,
+            productAttributeId: item.productAttributeId || 0,
+            quantity: -item.quantity, // Quantité négative pour retirer du stock
+            reasonId: 3, // 3 = Customer Order
+            employeeId: 1
+        })
+    } catch(e) {
+        console.warn(`[commandeService] Impossible de décrémenter le stock pour la commande ${orderId}`, e)
+    }
   }
 
-  if (orderStateId) {
-    await createOrderHistory({
-      id_order: orderId,
-      id_order_state: orderStateId
-    })
-  }
+  // Historique de l'état cible (pour afficher le bon état dans l'admin)
+  await createOrderHistory({
+    id_order: orderId,
+    id_order_state: orderStateId,
+    date_add: orderDate
+  })
 
   return `Commande ${orderId}`
 }
@@ -280,7 +318,7 @@ function formatMoney(value) {
 function resolveOrderStateId(status, config) {
   const normalized = String(status || '').trim().toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-  if (normalized.includes('accepte') || normalized.includes('effectue')) return config.orderStatePaidId
+  if (normalized.includes('accepte') || normalized.includes('effectue') || normalized.includes('payer') || normalized.includes('payee') || normalized.includes('paye')) return config.orderStatePaidId
   if (normalized.includes('erreur')) return config.orderStateErrorId
   if (normalized.includes('annul')) return 6 // default PS cancelled state is 6
   return config.orderStatePendingId

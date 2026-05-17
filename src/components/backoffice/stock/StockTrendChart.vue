@@ -43,15 +43,15 @@ const chartData = computed(() => {
 
   const dailyChanges = {}
   props.movements.forEach(m => {
-    const date = m.date_add ? new Date(m.date_add).toLocaleDateString('fr-FR') : null
-    if (date) {
-      if (!dailyChanges[date]) {
-        dailyChanges[date] = { count: 0, quantity: 0 }
+    const dateStr = m.date_add ? m.date_add.substring(0, 10) : null // "YYYY-MM-DD"
+    if (dateStr) {
+      if (!dailyChanges[dateStr]) {
+        dailyChanges[dateStr] = { count: 0, quantity: 0 }
       }
       const qty = parseInt(m.physical_quantity || 0)
       const sign = parseInt(m.sign || 1)
-      dailyChanges[date].count += 1
-      dailyChanges[date].quantity += (qty * sign)
+      dailyChanges[dateStr].count += 1
+      dailyChanges[dateStr].quantity += (qty * sign)
     }
   })
 
@@ -61,17 +61,19 @@ const chartData = computed(() => {
   )
 
   return Object.entries(dailyChanges)
-    .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+    .sort((a, b) => a[0].localeCompare(b[0]))
     .slice(-30)
-    .map(([date, data]) => ({
-      date,
-      dateShort: new Date(date).toLocaleDateString('fr-FR', {
-        day: '2-digit',
-        month: '2-digit',
-      }),
-      changes: data.quantity,
-      barHeight: (Math.abs(data.quantity) / maxChanges) * 100,
-    }))
+    .map(([dateStr, data]) => {
+      const parts = dateStr.split('-') // ["YYYY", "MM", "DD"]
+      const dateShort = parts.length === 3 ? `${parts[2]}/${parts[1]}` : dateStr
+      const fullDate = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : dateStr
+      return {
+        date: fullDate,
+        dateShort,
+        changes: data.quantity,
+        barHeight: (Math.abs(data.quantity) / maxChanges) * 100,
+      }
+    })
 })
 </script>
 
@@ -130,5 +132,28 @@ const chartData = computed(() => {
   color: #666;
   margin-top: 0.25rem;
 }
+.chart-legend {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+}
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: #333;
+}
+.dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.dot.positive {
+    background-color: #28a745;
+}
+.dot.negative {
+    background-color: #dc3545;
+}
 </style>
-

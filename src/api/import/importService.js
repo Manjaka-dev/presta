@@ -5,7 +5,7 @@
 import { DEFAULT_CATEGORY_ID, DEFAULT_LANG_ID } from './constants'
 import { createCategory, findCategoryIdByName } from './categoriesService'
 import { createProduct, findProductIdByReference, findProductInfoByReference, updateProduct, patchProductAvailableDate } from './productsService'
-import { setQuantityForProduct, setQuantityForProductAttribute } from './stockAvailablesService'
+import { createStockMovement } from '../stockService' // Utiliser le service de mouvement de stock
 import { uploadProductImage } from './imagesService'
 import { createProductOption, findProductOptionIdByName } from './productOptionsService'
 import { createProductOptionValue, findProductOptionValueIdByName } from './productOptionValuesService'
@@ -130,12 +130,15 @@ async function importProducts(rows, progress) {
   return { total: rows.length, success }
 }
 
+function toIsoDateTimeFromDateOnly(isoDateOnly) {
+  if (!isoDateOnly) return null
+  return `${isoDateOnly} 12:00:00`
+}
+
 // ─── Stocks & Déclinaisons ───────────────────────────────────────────────────
 
 async function importStocks(rows, progress) {
   let success = 0
-  const baseStockTotals = new Map()
-  const hasCombination = new Set()
   const optionCache = new Map()
   const valueCache = new Map()
   const combinationCache = new Map()
@@ -156,71 +159,51 @@ async function importStocks(rows, progress) {
       const specificite = getSpecificite(row)
       const karazany = row.karazany?.trim()
       const quantity = toInt(row.stock_initial || '0', 0)
+      const availableDateStr = row.date_availability_produit || row.date_produit || row.date || ''
+      const availableDate = toIsoDateTimeFromDateOnly(toIsoDate(availableDateStr))
+      
+      if (quantity === 0) {
+          progress(`Stock ligne ${index + 1}: quantité 0, ignoré pour "${reference}"`)
+          continue
+      }
 
+      let productAttributeId = 0
       if (specificite && karazany) {
-        hasCombination.add(reference)
         const groupId = await ensureProductOptionId(specificite, optionCache)
         const valueId = await ensureProductOptionValueId(groupId, karazany, valueCache)
         
-        let priceImpactStr = '0.00'
-        if (row.prix_vente_ttc) {
-          const salePriceTtc = toFloat(row.prix_vente_ttc || '0', 0)
-          
-          let taxRate = 0
-          if (productInfo.id_tax_rules_group) {
-            taxRate = await getTaxRateByGroupId(productInfo.id_tax_rules_group)
-          }
-          
-          const priceHtFinal = taxRate > 0 ? salePriceTtc / (1 + (taxRate / 100)) : salePriceTtc
-          const impact = priceHtFinal - productInfo.price
-          priceImpactStr = formatMoney(impact)
-        }
-
         const combinationId = await ensureCombinationId(
-          productInfo, valueId, reference, karazany, priceImpactStr, combinationCache
+          productInfo, valueId, reference, karazany, '0.00', combinationCache
         )
 
         if (!combinationId) {
-          progress(`Stock ligne ${index + 1}: impossible de créer la déclinaison pour "${reference}" ${karazany}`)
+          progress(`Stock ligne ${index + 1}: impossible de créer/trouver la déclinaison pour "${reference}" ${karazany}`)
           continue
         }
-
-        await setQuantityForProductAttribute(productInfo.id, combinationId, quantity)
-        progress(`Stock ligne ${index + 1}: "${reference}" ${karazany} → ${quantity} unités`)
-        success += 1
-
-        const total = baseStockTotals.get(reference) || 0
-        baseStockTotals.set(reference, total + quantity)
-        continue
+        productAttributeId = combinationId
       }
 
-      // Pas de déclinaison — stock simple
-      const total = baseStockTotals.get(reference) || 0
-      baseStockTotals.set(reference, total + quantity)
+      // Créer un mouvement de stock pour l'entrée initiale
+      await createStockMovement({
+          productId: productInfo.id,
+          productAttributeId: productAttributeId,
+          quantity: quantity,
+          reasonId: 1, // 1 = Increase (Ajout manuel de stock)
+          employeeId: 1, // ID de l'employé par défaut
+          dateAdd: availableDate
+      })
+      
+      progress(`Stock ligne ${index + 1}: Mouvement de +${quantity} créé pour "${reference}" ${karazany || ''}`)
+      success += 1
+
     } catch (error) {
       progress(`Stock ligne ${index + 1}: ERREUR — ${formatError(error)}`)
     }
   }
 
-  // Mettre à jour le stock de base pour les produits sans déclinaison
-  for (const [reference, total] of baseStockTotals.entries()) {
-    if (hasCombination.has(reference)) continue
-    try {
-      const productId = await findProductIdByReference(reference)
-      if (!productId) {
-        progress(`Stock: produit non trouvé pour "${reference}"`)
-        continue
-      }
-      await setQuantityForProduct(productId, total)
-      progress(`Stock: "${reference}" → ${total} unités`)
-      success += 1
-    } catch (error) {
-      progress(`Stock "${reference}": ERREUR — ${formatError(error)}`)
-    }
-  }
-
   return { total: rows.length, success }
 }
+
 
 // ─── Commandes ───────────────────────────────────────────────────────────────
 
