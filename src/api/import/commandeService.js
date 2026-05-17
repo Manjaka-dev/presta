@@ -52,6 +52,7 @@ export async function createOrderFromCsvRow(row, config) {
     return `Panier ${cartId}` // On s'arrête ici, la commande n'est pas créée !
   }
 
+
   const totals = await computeOrderTotals(resolvedItems) // Await this async function
   const orderStateId = resolveOrderStateId(row.etat, config)
   

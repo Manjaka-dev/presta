@@ -2,6 +2,7 @@
 import { reactive, computed, watch } from 'vue'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
+import { calculateCartTotal } from '@/api/useCheckout.js'
 
 const today = new Date()
 const pad = (n) => String(n).padStart(2, '0')
@@ -79,17 +80,27 @@ const loadPeriod = async () => {
   state.error = ''
   try {
     const { start, end } = getPeriodDates()
-    const api = resourceApi('orders')
-    const res = await api.list({
-      display: '[id,total_paid,date_add]',
-      'filter[date_add]': `[${start} 00:00:00,${end} 23:59:59]`,
-      date: 1,
-      limit: 1000,
-    })
-    const items = extractItems(res, api.resource)
+    const dateFilter = `[${start} 00:00:00,${end} 23:59:59]`;
 
-    state.periodOrders = items.length
-    state.periodTotal = items.reduce((s, o) => s + (parseFloat(o.total_paid) || 0), 0)
+    // 1. Récupérer TOUS les paniers créés sur la période
+    const cartApi = resourceApi('carts')
+    const cartRes = await cartApi.list({
+      display: '[id]', // On a juste besoin des IDs pour commencer
+      'filter[date_add]': dateFilter,
+      date: 1,
+      limit: 2000,
+    })
+    const allCartsInPeriod = extractItems(cartRes, cartApi.resource)
+    state.periodCartsCount = allCartsInPeriod.length
+
+    // 2. Calculer la valeur de TOUS ces paniers en parallèle
+    const cartValuePromises = allCartsInPeriod.map(cart => calculateCartTotal(cart.id));
+    const cartValues = await Promise.all(cartValuePromises);
+
+    // 3. Sommer les valeurs pour obtenir le total général
+    const grandTotal = cartValues.reduce((sum, value) => sum + value, 0);
+    state.periodGrandTotal = grandTotal;
+
   } catch (e) {
     state.error = e.message || 'Erreur de chargement'
     console.error('[Dashboard] Erreur stats période', e)
@@ -165,16 +176,16 @@ loadPeriod()
       <div v-else-if="state.loadingPeriod" class="loading-block">Chargement…</div>
       <div v-else class="kpi-grid">
         <div class="kpi-card kpi-card--blue">
-          <div class="kpi-label">Commandes (période)</div>
-          <div class="kpi-value">{{ state.periodOrders }}</div>
+          <div class="kpi-label">Paniers créés sur la période</div>
+          <div class="kpi-value">{{ state.periodCartsCount }}</div>
         </div>
         <div class="kpi-card kpi-card--green">
-          <div class="kpi-label">Total des ventes</div>
-          <div class="kpi-value">{{ fmtEur(state.periodTotal) }}</div>
+          <div class="kpi-label">Total général des paniers</div>
+          <div class="kpi-value">{{ fmtEur(state.periodGrandTotal) }}</div>
         </div>
         <div class="kpi-card kpi-card--purple">
-          <div class="kpi-label">Panier moyen</div>
-          <div class="kpi-value">{{ state.periodOrders > 0 ? fmtEur(state.periodTotal / state.periodOrders) : '—' }}</div>
+          <div class="kpi-label">Valeur moyenne par panier</div>
+          <div class="kpi-value">{{ state.periodCartsCount > 0 ? fmtEur(state.periodGrandTotal / state.periodCartsCount) : '—' }}</div>
         </div>
       </div>
     </div>

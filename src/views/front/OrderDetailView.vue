@@ -46,13 +46,13 @@ onMounted(() => { if (hasCustomer.value) load() })
       <RouterLink :to="{ name: 'front-orders', query: { customerId: form.customerId } }" class="button button--ghost">Retour liste</RouterLink>
     </header>
 
-    <div class="card order-detail-page__toolbar">
-      <label for="customer-id-detail">Identifiant client</label>
-      <div class="order-detail-page__toolbar-row">
-        <input id="customer-id-detail" v-model="form.customerId" type="number" min="1" class="order-detail-page__input" placeholder="Ex: 2" />
-        <button class="button" type="button" @click="load" :disabled="state.loading">{{ state.loading ? 'Chargement…' : 'Rafraîchir' }}</button>
-      </div>
-    </div>
+<!--    <div class="card order-detail-page__toolbar">-->
+<!--      <label for="customer-id-detail">Identifiant client</label>-->
+<!--      <div class="order-detail-page__toolbar-row">-->
+<!--        <input id="customer-id-detail" v-model="form.customerId" type="number" min="1" class="order-detail-page__input" placeholder="Ex: 2" />-->
+<!--        <button class="button" type="button" @click="load" :disabled="state.loading">{{ state.loading ? 'Chargement…' : 'Rafraîchir' }}</button>-->
+<!--      </div>-->
+<!--    </div>-->
 
     <div v-if="state.loading" class="card order-detail-page__state">Chargement du détail…</div>
     <div v-else-if="state.error" class="card order-detail-page__state order-detail-page__state--error">{{ state.error }}</div>
