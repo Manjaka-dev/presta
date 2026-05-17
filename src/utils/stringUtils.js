@@ -11,7 +11,8 @@ export function normalizeHeader(value) {
 }
 
 export function toInt(value, fallback = 0) {
-  const parsed = Number.parseInt(value, 10)
+  const cleaned = String(value).replace(/[^\d-]/g, '')
+  const parsed = Number.parseInt(cleaned, 10)
   return Number.isFinite(parsed) ? parsed : fallback
 }
 

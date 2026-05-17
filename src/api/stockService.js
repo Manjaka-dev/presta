@@ -138,6 +138,31 @@ export const createStockMovement = async ({ productId, productAttributeId = 0, q
   // 3. Envoyer la requête de création
   const response = await mvtApi.create(xmlPayload)
   
+  // 3bis. Mettre à jour la quantité disponible (stock_available)
+  if (stockAvail && stockAvail.id) {
+    try {
+      const currentQty = parseInt(stockAvail.quantity || 0, 10)
+      const newQty = currentQty + quantity
+      
+      const xmlBody = `<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+  <stock_available>
+    <id><![CDATA[${stockAvail.id}]]></id>
+    <id_product><![CDATA[${stockAvail.id_product}]]></id_product>
+    <id_product_attribute><![CDATA[${stockAvail.id_product_attribute}]]></id_product_attribute>
+    <id_shop><![CDATA[${stockAvail.id_shop || 1}]]></id_shop>
+    <id_shop_group><![CDATA[${stockAvail.id_shop_group || 0}]]></id_shop_group>
+    <quantity><![CDATA[${newQty}]]></quantity>
+    <depends_on_stock><![CDATA[${stockAvail.depends_on_stock || 0}]]></depends_on_stock>
+    <out_of_stock><![CDATA[${stockAvail.out_of_stock || 0}]]></out_of_stock>
+  </stock_available>
+</prestashop>`
+      await putXml(`stock_availables/${stockAvail.id}`, xmlBody)
+    } catch (e) {
+      console.error(`[stockService] Impossible de mettre à jour stock_available ${stockAvail.id}`, e)
+    }
+  }
+
   // Patch pour forcer la date de création si dateAdd est fourni
   if (dateAdd) {
       const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
