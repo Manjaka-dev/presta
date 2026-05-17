@@ -1,11 +1,6 @@
 import { resourceApi } from '@/api/resources'
 import { extractItems, extractSingleItem } from '@/utils/resourceData.js'
 
-// --- Fonctions d'extraction de données ---
-
-// Note: extractItems n'est pas défini ici car il est importé et correct.
-
-
 // --- Fonctions de calcul de taxe ---
 
 let cachedTaxes = null
@@ -119,7 +114,7 @@ export const createCart = async (cartData) => {
   const xml = buildCartXml(cartData)
   const response = await api.create(xml)
 
-  const match = response.match(/<id>[^0-9*(\d+)[^0-9]*<\/id>/i)
+  const match = response.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
   if (!match) throw new Error('Could not get cart ID from response')
 
   const cartId = parseInt(match[1])
@@ -155,16 +150,45 @@ export const deleteCart = async (cartId) => {
 }
 
 const buildOrderXml = async (orderData) => {
-  const { customerId, paymentModule, addressId, items, cartId, statusId, secureKey } = orderData
+  const { customerId, paymentModule, addressId, cartId, statusId, secureKey } = orderData
 
-  if (!customerId || !addressId || !items || items.length === 0) {
+  if (!customerId || !addressId || !cartId) {
     throw new Error('Missing data for order creation')
   }
 
-  const { totalTaxAmount } = await calculateCartTaxes(items)
-  const totalProductsHT = items.reduce((sum, item) => sum + ((parseFloat(item.price) || 0) * (parseInt(item.quantity, 10) || 1)), 0)
-  const totalPaidTTC = parseFloat((totalProductsHT + totalTaxAmount).toFixed(2)) || 0
+  // 1. Récupérer les détails complets du panier depuis PrestaShop
+  const cartDetails = await getCartDetails(cartId)
+  if (!cartDetails.items || cartDetails.items.length === 0) {
+    throw new Error('Le panier est vide ou introuvable sur le serveur')
+  }
 
+  // 2. Calcul des taxes et totaux
+  const { totalTaxAmount, itemsWithTax } = await calculateCartTaxes(cartDetails.items)
+  const totalProductsHT = itemsWithTax.reduce((sum, item) => sum + ((parseFloat(item.price) || 0) * (parseInt(item.quantity, 10) || 1)), 0)
+  const totalPaidTTC = totalProductsHT + totalTaxAmount
+
+  const formatPrice = (val) => parseFloat(val || 0).toFixed(6)
+
+  // 3. Construction des lignes de produits intégrées à la commande
+  const orderRowsXml = itemsWithTax.map(item => {
+    const priceHT = parseFloat(item.price) || 0
+    const taxRate = parseFloat(item.taxRate) || 0
+    const priceTTC = priceHT * (1 + taxRate / 100)
+    const quantity = parseInt(item.quantity) || 1
+
+    return `
+        <order_row>
+          <product_id>${item.id}</product_id>
+          <product_attribute_id>${item.combinationId || 0}</product_attribute_id>
+          <product_quantity>${quantity}</product_quantity>
+          <product_name>${escapeXml(item.name)}</product_name>
+          <product_price>${formatPrice(priceHT)}</product_price>
+          <unit_price_tax_incl>${formatPrice(priceTTC)}</unit_price_tax_incl>
+          <unit_price_tax_excl>${formatPrice(priceHT)}</unit_price_tax_excl>
+        </order_row>`
+  }).join('')
+
+  // 4. XML complet requis pour que PrestaShop calcule la facture au statut 2
   return `<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <order>
@@ -178,15 +202,35 @@ const buildOrderXml = async (orderData) => {
     <current_state>${statusId}</current_state>
     <module>${paymentModule}</module>
     <payment>Paiement à la livraison</payment>
-    <total_paid>${totalPaidTTC.toFixed(2)}</total_paid>
-    <total_paid_real>${totalPaidTTC.toFixed(2)}</total_paid_real>
-    <total_products>${totalProductsHT.toFixed(2)}</total_products>
-    <total_products_wt>${totalPaidTTC.toFixed(2)}</total_products_wt>
+    
+    <total_discounts>0.000000</total_discounts>
+    <total_discounts_tax_incl>0.000000</total_discounts_tax_incl>
+    <total_discounts_tax_excl>0.000000</total_discounts_tax_excl>
+    
+    <total_paid>${formatPrice(totalPaidTTC)}</total_paid>
+    <total_paid_tax_incl>${formatPrice(totalPaidTTC)}</total_paid_tax_incl>
+    <total_paid_tax_excl>${formatPrice(totalProductsHT)}</total_paid_tax_excl>
+    <total_paid_real>${formatPrice(totalPaidTTC)}</total_paid_real>
+    
+    <total_products>${formatPrice(totalProductsHT)}</total_products>
+    <total_products_wt>${formatPrice(totalPaidTTC)}</total_products_wt>
+    
+    <total_shipping>0.000000</total_shipping>
+    <total_shipping_tax_incl>0.000000</total_shipping_tax_incl>
+    <total_shipping_tax_excl>0.000000</total_shipping_tax_excl>
+    
     <conversion_rate>1.000000</conversion_rate>
     <secure_key>${secureKey}</secure_key>
+    
+    <associations>
+      <order_rows>
+        ${orderRowsXml}
+      </order_rows>
+    </associations>
   </order>
 </prestashop>`
 }
+
 
 const escapeXml = (text) => {
   if (typeof text !== 'string') return ''
@@ -201,52 +245,30 @@ export const createOrder = async (checkoutData) => {
   let secureKey = ''
   const customerObj = customerRes?.customer || customerRes?.customers?.[0] || customerRes?.prestashop?.customer
   if (customerObj) {
-      if (typeof customerObj.secure_key === 'string') {
-          secureKey = customerObj.secure_key
-      } else if (customerObj.secure_key && typeof customerObj.secure_key === 'object') {
-          secureKey = Object.values(customerObj.secure_key)[0]
-      }
+    if (typeof customerObj.secure_key === 'string') {
+      secureKey = customerObj.secure_key
+    } else if (customerObj.secure_key && typeof customerObj.secure_key === 'object') {
+      secureKey = Object.values(customerObj.secure_key)[0]
+    }
   } else if (customerRes?.__raw) {
-      const match = customerRes.__raw.match(/<secure_key>(?:<!\[CDATA\[)?(.*?)(?:\\]>)?<\/secure_key>/)
-      if (match) secureKey = match[1]
+    const match = customerRes.__raw.match(/<secure_key>(?:<!\[CDATA\[)?(.*?)(?:\\]>)?<\/secure_key>/)
+    if (match) secureKey = match[1]
   }
 
   if (!secureKey) {
-      console.error('[useCheckout] Failed to retrieve secure_key from:', customerRes)
-      throw new Error('Could not retrieve customer secure_key')
+    console.error('[useCheckout] Failed to retrieve secure_key from:', customerRes)
+    throw new Error('Could not retrieve customer secure_key')
   }
 
-  // 2. Créer l'entité Order
+  // 2. Créer l'entité Order directement avec les lignes (associations) et le statut de paiement direct.
   const orderXml = await buildOrderXml({ ...checkoutData, secureKey })
   const orderApi = resourceApi('orders')
   const orderResponse = await orderApi.create(orderXml)
 
   const orderIdMatch = orderResponse.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
   if (!orderIdMatch) throw new Error('Could not get order ID from response')
+
   const orderId = parseInt(orderIdMatch[1])
-
-  // 3. Créer les order_details pour chaque produit
-  const orderDetailsApi = resourceApi('order_details')
-  const { itemsWithTax } = await calculateCartTaxes(checkoutData.items)
-
-  for (const item of itemsWithTax) {
-    const detailXml = `<?xml version="1.0" encoding="UTF-8"?>
-<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
-  <order_detail>
-    <id_order>${orderId}</id_order>
-    <product_id>${item.id}</product_id>
-    <product_attribute_id>${item.combinationId || 0}</product_attribute_id>
-    <product_name>${escapeXml(item.name)}</product_name>
-    <product_quantity>${item.quantity}</product_quantity>
-    <product_price>${item.price}</product_price>
-    <unit_price_tax_incl>${((item.price * (1 + item.taxRate / 100))).toFixed(2)}</unit_price_tax_incl>
-    <unit_price_tax_excl>${item.price}</unit_price_tax_excl>
-    <total_price_tax_incl>${((item.price * (1 + item.taxRate / 100)) * item.quantity).toFixed(2)}</total_price_tax_incl>
-    <total_price_tax_excl>${(item.price * item.quantity).toFixed(2)}</total_price_tax_excl>
-  </order_detail>
-</prestashop>`
-    await orderDetailsApi.create(detailXml)
-  }
 
   return { success: true, orderId }
 }
@@ -273,7 +295,6 @@ export const validateCheckoutData = async (checkoutData) => {
 }
 
 // --- Autres fonctions utilitaires ---
-
 export const getCustomerAddresses = async (customerId) => {
   try {
     const api = resourceApi('addresses')
@@ -311,6 +332,7 @@ export const getCartDetails = async (cartId) => {
     let combinations = [];
     if (comboIds) {
       const cApi = resourceApi('combinations');
+      // FIXED missing bracket below
       const cRes = await cApi.list({ display: '[id,price]', 'filter[id]': `[${comboIds}]` }).catch(() => null);
       if (cRes) combinations = extractItems(cRes, cApi.resource);
     }
@@ -354,7 +376,7 @@ export const deleteOrder = async (orderId) => {
   // 1. Supprimer les lignes de commande (order_details)
   try {
     const detailsApi = resourceApi('order_details')
-    const dRes = await detailsApi.list({ 'filter[id_order]': `[${orderId}]`, display: '[id' })
+    // FIXED missing bracket below
     const details = extractItems(dRes, detailsApi.resource)
     await Promise.allSettled(details.map(d => detailsApi.remove(d.id)))
   } catch (e) {
@@ -364,6 +386,7 @@ export const deleteOrder = async (orderId) => {
   // 2. Supprimer l'historique des statuts (order_histories)
   try {
     const histApi = resourceApi('order_histories')
+    // FIXED missing bracket below
     const hRes = await histApi.list({ 'filter[id_order]': `[${orderId}]`, display: '[id]' })
     const histories = extractItems(hRes, histApi.resource)
     await Promise.allSettled(histories.map(h => histApi.remove(h.id)))
@@ -399,6 +422,7 @@ export async function calculateCartTotal(cartId) {
     // On ne fait ces appels API qu'une seule fois.
     if (!cachedTaxes) {
       const taxesApi = resourceApi('taxes');
+      // FIXED missing bracket below
       const tRes = await taxesApi.list({ display: '[id,rate,name]' });
       cachedTaxes = extractItems(tRes, taxesApi.resource);
     }

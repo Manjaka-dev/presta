@@ -86,42 +86,52 @@ const syncWithApi = async () => {
 
 const loadCustomerCart = async (customerId) => {
   try {
-    const api = resourceApi('carts')
+    const api = resourceApi('carts');
+
+    // CORRECTION : PrestaShop carts API ne permet pas de filtrer par date_upd ou date_add.
+    // L'ID étant auto-incrémenté, un tri sur l'ID décroissant est équivalent à date_upd_DESC.
     const res = await api.list({
       'filter[id_customer]': `[${customerId}]`,
-      sort: '[date_upd_DESC]',
+      sort: '[id_DESC]',
       limit: 1,
       display: 'full'
-    })
-    const carts = extractItems(res, api.resource)
+    });
+    
+    const carts = extractItems(res, api.resource);
+
     if (carts && carts.length > 0) {
-       const cartId = carts[0].id
-       // Vérifier si ce panier est déjà commandé
-       const orderApi = resourceApi('orders')
+       const cartId = carts[0].id;
+       // On vérifie si ce panier n'est pas déjà associé à une commande finalisée.
+       const orderApi = resourceApi('orders');
        const orderRes = await orderApi.list({
          'filter[id_cart]': `[${cartId}]`,
          limit: 1,
          display: '[id]'
-       }).catch(() => null)
-       const orders = orderRes ? extractItems(orderRes, orderApi.resource) : []
-       
+       }).catch(() => null);
+       const orders = orderRes ? extractItems(orderRes, orderApi.resource) : [];
+
        if (orders.length === 0) {
-         // Le panier est toujours actif/abandonné
-         const details = await getCartDetails(cartId)
-         cartState.cartId = parseInt(cartId)
-         cartState.items = details.items || []
-         persist(cartState.items, cartState.cartId)
-         return
+         // C'est un panier actif, on le charge.
+         const details = await getCartDetails(cartId);
+         cartState.cartId = parseInt(cartId);
+         cartState.items = details.items || [];
+         persist(cartState.items, cartState.cartId);
+         console.info(`[useCart] Panier actif trouvé (ID: ${cartId}) et chargé pour le client ${customerId}.`);
+         return; // On a trouvé, on s'arrête là.
        }
     }
+
   } catch (e) {
-    console.warn("[useCart] Could not load customer cart", e.message)
+    // On log l'erreur mais on ne bloque pas l'application
+    console.warn("[useCart] N'a pas pu charger un panier existant pour le client :", e.message);
   }
   
-  // S'il n'y a pas de panier actif, on vide le local state
-  cartState.cartId = null
-  cartState.items = []
-  persist([], null)
+  // Si aucun panier actif n'a été trouvé (ou en cas d'erreur),
+  // on s'assure que l'état local est propre.
+  console.info(`[useCart] Aucun panier actif trouvé pour le client ${customerId}. Un nouveau sera créé si besoin.`);
+  cartState.cartId = null;
+  cartState.items = [];
+  persist([], null);
 }
 
 // --- Composable ---
