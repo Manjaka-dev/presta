@@ -11,6 +11,7 @@ import CheckoutView from '../views/front/CheckoutView.vue'
 import BackOfficeHome from '../views/back/BackOfficeHome.vue'
 import BackOfficeLogin from '../views/back/BackOfficeLogin.vue'
 import DashboardView from '../views/back/DashboardView.vue'
+import StatisticsView from '../views/back/StatisticsView.vue'
 import ResetFront from '../components/backoffice/reset/ResetFront.vue'
 import OrdersBackoffice from '../components/backoffice/orders/OrdersBackoffice.vue'
 import DataImportView from '../views/back/DataImportView.vue'
@@ -98,6 +99,11 @@ const router = createRouter({
       component: DashboardView,
     },
     {
+      path: '/back/statistics',
+      name: 'back-statistics',
+      component: StatisticsView,
+    },
+    {
       path: '/back/import',
       name: 'back-import',
       component: DataImportView,
@@ -132,8 +138,15 @@ router.beforeEach((to, from, next) => {
   // On peut protéger toutes les routes /front sauf les logins
   if (to.path.startsWith('/front') && !['front-login', 'front-old-login'].includes(to.name)) {
     const customerId = sessionStorage.getItem('customerId') || localStorage.getItem('customerId')
-    // null = non connecté
-    if (customerId === null) {
+    const isAnonymous = sessionStorage.getItem('isAnonymous') === 'true'
+    
+    // Si non connecté et pas en mode anonyme, rediriger vers le login
+    if (customerId === null && !isAnonymous) {
+      return next({ name: 'front-login' })
+    }
+    
+    // Si anonyme, bloquer l'accès aux commandes client
+    if (isAnonymous && ['front-orders', 'front-order-detail'].includes(to.name)) {
       return next({ name: 'front-login' })
     }
   }

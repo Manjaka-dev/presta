@@ -8,24 +8,17 @@ import { createOrder, deleteOrder, getCartDetails, calculateCartTotal } from '@/
 const EDITABLE_STATUSES = reactive({})
 
 // --- CONFIGURATION POUR FILTRAGE / RENOMMAGE ---
-// Filtrer par ID (recommandé). Laisser vide [] pour autoriser tous les statuts.
-const ALLOWED_STATUS_IDS = [] // ex: [1, 2, 6]
+// Filtrer par ID (recommandé).
+const ALLOWED_STATUS_IDS = [2, 5, 6]
 
-// Alternative: filtrer par nom exact (si vous ne connaissez pas les IDs).
-// Si ALLOWED_STATUS_IDS contient des valeurs, il a priorité.
-const ALLOWED_STATUS_NAMES = [
-    'Annulé',
-    'Paiement accepté'
-] // ex: ['Annulé', 'Payment failed']
+// Alternative: filtrer par nom exact.
+const ALLOWED_STATUS_NAMES = []
 
 // Renommage: map statut ID -> nouveau libellé
-// OU map nom exact -> nouveau libellé. Exemples:
-// { 6: 'Arrêter' }            -> remplace par ID
-// { 'Annulé': 'Arrêter' }     -> remplace par nom exact retourné par l'API
 const NAME_OVERRIDES = {
-  // 6: 'Arrêter',
-  'Paiement accepté': 'paiement effectué',
-  'Annulé': 'annulé'
+  2: 'paiement effectué',
+  5: 'livré',
+  6: 'annulé'
 }
 // --- fin configuration ---
 
@@ -176,16 +169,27 @@ const getStatusLabel = (statusId) => {
 }
 
 const isEditableStatus = (statusId) => {
-  return statusId in EDITABLE_STATUSES
+  return statusId === 2 || statusId === 5 || statusId === 6
 }
 
-// IDs des statuts clés
-const STATUS_PAID = 2
-const STATUS_CANCELLED = 6
+const getAvailableTransitions = (statusId) => {
+  const transitions = []
+  if (statusId === 2) {
+    transitions.push({ id: 5, label: EDITABLE_STATUSES[5] || 'livré' })
+    transitions.push({ id: 6, label: EDITABLE_STATUSES[6] || 'annulé' })
+  } else if (statusId === 5) {
+    transitions.push({ id: 6, label: EDITABLE_STATUSES[6] || 'annulé' })
+  } else if (statusId === 6) {
+    transitions.push({ id: 2, label: EDITABLE_STATUSES[2] || 'paiement effectué' })
+    transitions.push({ id: 5, label: EDITABLE_STATUSES[5] || 'livré' })
+  }
+  return transitions
+}
 
 const startEditing = (orderId, currentStatusId) => {
   editing.orderId = orderId
-  editing.statusId = currentStatusId === 'cart' ? 'cart' : currentStatusId
+  const transitions = getAvailableTransitions(currentStatusId)
+  editing.statusId = transitions.length > 0 ? transitions[0].id : currentStatusId
 }
 
 const cancelEditing = () => {
@@ -302,18 +306,18 @@ init()
           <template v-if="editing.orderId === order.id">
             <select
               :value="editing.statusId"
-              @change="e => editing.statusId = e.target.value === 'cart' ? 'cart' : parseInt(e.target.value)"
+              @change="e => editing.statusId = parseInt(e.target.value)"
               class="status-select small"
             >
-              <option value="cart">dans le panier</option>
-              <option v-for="(label, statusId) in EDITABLE_STATUSES" :key="statusId" :value="parseInt(statusId)">
-                {{ label }}
+              <option :value="order.statusId" disabled>Sélectionner un statut</option>
+              <option v-for="opt in getAvailableTransitions(order.statusId)" :key="opt.id" :value="opt.id">
+                {{ opt.label }}
               </option>
             </select>
           </template>
           <template v-else>
             <span class="status-badge" :class="order.statusId === 'cart' ? 'status-cart' : `status-${order.statusId}`">
-              {{ order.statusId === 'cart' ? ' dans le panier' : getStatusLabel(order.statusId) }}
+              {{ order.statusId === 'cart' ? 'dans le panier' : getStatusLabel(order.statusId) }}
             </span>
           </template>
         </div>
@@ -337,7 +341,7 @@ init()
               Annuler
             </button>
           </template>
-          <template v-else-if="isEditableStatus(order.statusId) || order.type === 'cart'">
+          <template v-else-if="isEditableStatus(order.statusId)">
             <button
               class="button button--small button--ghost"
               type="button"
@@ -448,19 +452,21 @@ init()
 
 .status-badge {
   display: inline-block;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  border-radius: 9999px;
   font-size: 0.75rem;
-  background: #e8e8e8;
-  color: #333;
+  font-weight: 600;
+  letter-spacing: 0.025em;
+  background: #f3f4f6;
+  color: #374151;
 }
 
-.status-badge.status-1 { background: #d4edda; color: #155724; }
-.status-badge.status-2 { background: #cce5ff; color: #004085; }
-.status-badge.status-6 { background: #f0f0f0; color: #666; }
-.status-badge.status-cart { background: #fff3cd; color: #856404; }
+.status-badge.status-2 { background: rgba(79, 70, 229, 0.1); color: #4f46e5; }
+.status-badge.status-5 { background: rgba(16, 185, 129, 0.1); color: #10b981; }
+.status-badge.status-6 { background: rgba(244, 63, 94, 0.1); color: #f43f5e; }
+.status-badge.status-cart { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
 
-.row--cart { background: #fffdf0; }
+.row--cart { background: #fbfbfd; }
 
 .status-select {
   border: 1px solid var(--border);

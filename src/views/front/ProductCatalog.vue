@@ -7,6 +7,8 @@ import { useCart } from '@/api/useCart'
 import { getProductImageUrl } from '@/api/httpClient'
 
 const router = useRouter()
+const isAnonymous = computed(() => sessionStorage.getItem('isAnonymous') === 'true')
+
 const state = reactive({
   loading: true,
   products: [],
@@ -250,14 +252,15 @@ loadProducts()
         <p class="muted">Parcourez notre sélection de produits</p>
       </div>
       <div class="catalog-header__cart">
-        <RouterLink to="/front/orders" class="button button--ghost">
+        <RouterLink v-if="!isAnonymous" to="/front/orders" class="button button--ghost">
           Mes commandes
         </RouterLink>
         <RouterLink to="/front/cart" class="button button--primary">
           🛒 Panier
           <span v-if="cartItemCount > 0" class="badge">{{ cartItemCount }}</span>
         </RouterLink>
-        <button @click="handleLogout" class="button button--danger" style="margin-left: 0.5rem;">Déconnexion</button>
+        <button v-if="!isAnonymous" @click="handleLogout" class="button button--danger" style="margin-left: 0.5rem;">Déconnexion</button>
+        <RouterLink v-else to="/front/login" class="button button--secondary" style="margin-left: 0.5rem; text-decoration: none;">Connexion</RouterLink>
       </div>
     </header>
 

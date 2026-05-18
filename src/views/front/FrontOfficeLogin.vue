@@ -7,7 +7,7 @@ import { setCustomerId } from '@/api/customerIdentity'
 import { useCart } from '@/api/useCart'
 
 const router = useRouter()
-const { loadCustomerCart } = useCart()
+const { loadCustomerCart, clearCart } = useCart()
 
 const state = reactive({
   customers: [],
@@ -54,67 +54,12 @@ const selectAnonymous = async () => {
   state.loading = true
   state.error = ''
   try {
-    const email = 'anonyme@presta.local'
-    const apiC = resourceApi('customers')
-    let customerId = null
+    // Vider le panier local pour repartir de zéro comme demandé
+    await clearCart()
 
-    // Chercher si l'utilisateur anonyme existe déjà
-    try {
-      const resSearch = await apiC.list({ 'filter[email]': `[${email}]`, display: '[id]' })
-      const found = extractItems(resSearch, apiC.resource)
-      if (found && found.length > 0) {
-        customerId = parseInt(found[0].id)
-      }
-    } catch (e) {
-      // Ignorer l'erreur de recherche
-    }
-
-    if (!customerId) {
-      // Créer le client anonyme unique
-      const xmlCustomer = `<?xml version="1.0" encoding="UTF-8"?>
-<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
-  <customer>
-    <id_lang>1</id_lang>
-    <id_default_group>1</id_default_group>
-    <firstname>Anonyme</firstname>
-    <lastname>Visiteur</lastname>
-    <email>${email}</email>
-    <passwd>12345678</passwd>
-    <active>1</active>
-    <is_guest>1</is_guest>
-  </customer>
-</prestashop>`
-
-      const resC = await apiC.create(xmlCustomer)
-      const matchC = resC.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
-      if (!matchC) throw new Error("Échec création client anonyme")
-      customerId = parseInt(matchC[1])
-
-      // Créer une adresse par défaut pour l'anonyme
-      const xmlAddr = `<?xml version="1.0" encoding="UTF-8"?>
-<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
-  <address>
-    <id_customer>${customerId}</id_customer>
-    <id_country>8</id_country>
-    <alias>Mon adresse</alias>
-    <lastname>Visiteur</lastname>
-    <firstname>Anonyme</firstname>
-    <address1>12 rue de la Paix</address1>
-    <postcode>75001</postcode>
-    <city>Paris</city>
-  </address>
-</prestashop>`
-
-      const apiA = resourceApi('addresses')
-      await apiA.create(xmlAddr)
-    }
-
-    // Connecter l'utilisateur anonyme
+    // Configurer la session en mode anonyme
     sessionStorage.setItem('isAnonymous', 'true')
-    setCustomerId(customerId)
-
-    // Charger le panier partagé pour tous les anonymes
-    await loadCustomerCart(customerId)
+    sessionStorage.removeItem('customerId')
 
     router.push('/front/products')
   } catch (error) {

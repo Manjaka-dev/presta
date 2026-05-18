@@ -1,6 +1,5 @@
 import { resourceApi } from '@/api/resources'
 import { extractItems, extractSingleItem } from '@/utils/resourceData.js'
-import { createStockMovement } from './stockService.js'
 
 // --- Fonctions de calcul de taxe ---
 
@@ -68,7 +67,6 @@ function getTaxInfoForItem(item, taxRules, taxes) {
 
 const buildCartXml = (cartData) => {
   const { id, customerId, addressId = 1, idLang = 1, idCurrency = 1, items = [] } = cartData
-  if (!customerId) throw new Error('customerId is required for cart')
 
   let associationsXml = ''
   if (items.length > 0) {
@@ -98,7 +96,7 @@ const buildCartXml = (cartData) => {
   <cart>
     ${id ? `<id>${id}</id>` : ''}
     <id_currency>${idCurrency}</id_currency>
-    <id_customer>${customerId}</id_customer>
+    <id_customer>${customerId || 0}</id_customer>
     <id_address_delivery>${addressId}</id_address_delivery>
     <id_address_invoice>${addressId}</id_address_invoice>
     <id_lang>${idLang}</id_lang>
@@ -306,40 +304,7 @@ export const createOrder = async (checkoutData) => {
   // on utilise la date courante. 
   
   const now = new Date().toLocaleString('sv').slice(0, 19)
-
-   // 3. Décrémenter le stock manuellement et générer l'historique
-   // ⚠️ CRITICAL: Utiliser cartDetails.items (importés au début de createOrder)
-   //    car c'est la SEULE source fiable de combinationId!
-   if (cartDetails.items && cartDetails.items.length > 0) {
-       // Reconstruire les items avec productAttributeId EXPLICITEMENT
-       const itemsForStockMove = cartDetails.items.map(item => ({
-           id: item.id,
-           productAttributeId: item.combinationId || 0,  // ← combinationId vient de getCartDetails
-           quantity: item.quantity,
-           name: item.name
-       }))
-
-       for (const item of itemsForStockMove) {
-           try {
-               console.debug(`[useCheckout] Avant stock movement: produit ${item.id}, attribut ${item.productAttributeId}, qty -${item.quantity}`)
-               await createStockMovement({
-                   productId: item.id,
-                   productAttributeId: item.productAttributeId,  // ← Depuis cartDetails.items
-                   quantity: -item.quantity,
-                   reasonId: 3,  // 3 = Customer Order
-                   employeeId: 1,
-                   dateAdd: now
-               })
-               console.debug(`[useCheckout] ✅ Stock décrémenté pour produit ${item.id}, attribut ${item.productAttributeId}, quantité -${item.quantity}`)
-           } catch(e) {
-               console.warn(`[useCheckout] ❌ Impossible de décrémenter le stock pour la commande ${orderId}:`, e.message)
-           }
-       }
-   } else {
-       console.warn(`[useCheckout] ⚠️ Pas d'items pour décrémenter le stock! cartDetails.items:`, cartDetails.items)
-   }
-
-  // 4. Ajouter l'historique d'état cible
+  // 3. Ajouter l'historique d'état cible
   if (checkoutData.statusId) {
       const histApi = resourceApi('order_histories')
       try {

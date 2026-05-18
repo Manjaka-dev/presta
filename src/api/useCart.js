@@ -37,8 +37,11 @@ const cartState = reactive({
 
 // --- Cart API sync ---
 const getCustomerId = () => {
+  if (sessionStorage.getItem('isAnonymous') === 'true') {
+    return null
+  }
   const val = sessionStorage.getItem('customerId') || localStorage.getItem('customerId')
-  return val ? parseInt(val) : 2 // fallback client ID
+  return val ? parseInt(val) : null
 }
 
 const syncWithApi = async () => {

@@ -1,9 +1,11 @@
 <script setup>
-import { reactive } from 'vue'
+import { reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCart } from '@/api/useCart'
-import { createOrder, createCart, validateCheckoutData } from '@/api/useCheckout'
-import { useCustomer } from '@/api/customerIdentity'
+import { createOrder, createCart, updateCart, validateCheckoutData } from '@/api/useCheckout'
+import { useCustomer, setCustomerId } from '@/api/customerIdentity'
+import { resourceApi } from '@/api/resources'
+import { extractItems } from '@/utils/resourceData.js'
 
 const router = useRouter()
 const { items, totalPrice, cartId, syncing, removeItem, updateQuantity, clearCart } = useCart()
@@ -14,9 +16,82 @@ const state = reactive({
   error: '',
   success: false,
   orderId: null,
-  step: 'cart', // 'cart', 'summary', 'confirmation'
+  step: 'cart', // 'cart', 'login', 'summary', 'confirmation'
   paymentMethod: 'cod', // 'cod' for Cash on Delivery
 })
+
+const loginState = reactive({
+  customers: [],
+  selectedCustomerId: '',
+  password: '',
+  loadingCustomers: false,
+  error: '',
+})
+
+const loadLoginCustomers = async () => {
+  loginState.loadingCustomers = true
+  loginState.error = ''
+  try {
+    const api = resourceApi('customers')
+    const res = await api.list({
+      display: '[id,firstname,lastname,email,id_default_group,active]',
+      limit: 100,
+    })
+    const all = extractItems(res, api.resource)
+    loginState.customers = all.filter(c => {
+      const active = c.active === '1' || c.active === 1
+      const groupId = parseInt(c.id_default_group)
+      return active && groupId >= 3
+    })
+    if (loginState.customers.length > 0) {
+      loginState.selectedCustomerId = loginState.customers[0].id
+    }
+  } catch (e) {
+    loginState.error = 'Erreur lors du chargement des clients'
+    console.error('[CartView] loadLoginCustomers error:', e)
+  } finally {
+    loginState.loadingCustomers = false
+  }
+}
+
+const handleCheckoutLogin = async () => {
+  if (!loginState.selectedCustomerId) {
+    loginState.error = 'Veuillez sélectionner un client'
+    return
+  }
+
+  state.loading = true
+  loginState.error = ''
+  try {
+    // 1. Enregistrer la session de l'utilisateur connecté
+    sessionStorage.removeItem('isAnonymous')
+    setCustomerId(loginState.selectedCustomerId)
+
+    // 2. Charger le profil du client (et son adresse)
+    await loadCustomer()
+
+    // 3. Associer le panier temporaire anonyme (si existant) à cet utilisateur dans PrestaShop
+    if (cartId.value && customer.value) {
+      try {
+        const freshAddressId = customer.value.addressId || 1
+        await updateCart(cartId.value, {
+          customerId: customer.value.id,
+          addressId: freshAddressId,
+          items: items.value,
+        })
+      } catch (cartErr) {
+        console.warn('[CartView] Échec association panier, poursuite création fresh cart au paiement:', cartErr.message)
+      }
+    }
+
+    // 4. Passer au résumé de commande
+    state.step = 'summary'
+  } catch (err) {
+    loginState.error = 'Erreur de connexion : ' + err.message
+  } finally {
+    state.loading = false
+  }
+}
 
 const handleQuantityChange = (identifier, newQty) => {
   if (newQty <= 0) {
@@ -31,7 +106,13 @@ const proceedToCheckout = () => {
     state.error = 'Votre panier est vide'
     return
   }
-  state.step = 'summary'
+  const isAnonymous = sessionStorage.getItem('isAnonymous') === 'true'
+  if (isAnonymous) {
+    state.step = 'login'
+    loadLoginCustomers()
+  } else {
+    state.step = 'summary'
+  }
 }
 
 const placeOrder = async () => {
@@ -166,6 +247,53 @@ const backToCart = () => {
             </button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Step: Login (Checkout integration for Anonymous users) -->
+    <div v-if="state.step === 'login'">
+      <header class="cart-header">
+        <h2>Identification client</h2>
+      </header>
+      <div class="login-checkout-card">
+        <p class="login-checkout-subtitle">Sélectionnez votre compte client pour finaliser et valider votre commande.</p>
+        
+        <div v-if="loginState.loadingCustomers" class="loading-spinner">
+          Chargement de la liste des clients...
+        </div>
+        
+        <form v-else @submit.prevent="handleCheckoutLogin" class="login-checkout-form">
+          <div class="form-group">
+            <label for="checkout-user-select">Compte Client :</label>
+            <select id="checkout-user-select" v-model="loginState.selectedCustomerId" class="form-select">
+              <option v-for="c in loginState.customers" :key="c.id" :value="c.id">
+                {{ c.firstname }} {{ c.lastname }} ({{ c.email }})
+              </option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="checkout-password">Mot de passe :</label>
+            <input 
+              id="checkout-password"
+              v-model="loginState.password" 
+              type="password" 
+              placeholder="Entrez un mot de passe"
+              class="form-input" 
+            />
+          </div>
+          
+          <div v-if="loginState.error" class="error-block">
+            <p>{{ loginState.error }}</p>
+          </div>
+          
+          <div class="cart-actions">
+            <button type="button" class="button button--ghost" @click="backToCart">Retour au panier</button>
+            <button type="submit" class="button button--primary" :disabled="state.loading">
+              {{ state.loading ? 'Connexion...' : 'Se connecter et continuer' }}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
 
@@ -477,5 +605,58 @@ const backToCart = () => {
   .cart-summary {
     padding: 1rem;
   }
+}
+
+.login-checkout-card {
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 2rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+  max-width: 500px;
+  margin: 2rem auto;
+}
+
+.login-checkout-subtitle {
+  color: #666;
+  font-size: 0.95rem;
+  margin-bottom: 1.5rem;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.form-group {
+  margin-bottom: 1.25rem;
+}
+
+.form-group label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: #333;
+}
+
+.form-select, .form-input {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-family: inherit;
+  background-color: #fafafa;
+  transition: all 0.2s ease;
+}
+
+.form-select:focus, .form-input:focus {
+  outline: none;
+  border-color: var(--primary, #0066cc);
+  background-color: white;
+  box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
+}
+
+.loading-spinner {
+  text-align: center;
+  padding: 2rem;
+  color: #666;
 }
 </style>

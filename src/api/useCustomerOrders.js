@@ -25,6 +25,14 @@ const getStatusMap = async () => {
   return Object.fromEntries(items.map(state => [parseInt(state.id), state.name]))
 }
 
+const mapStatusLabel = (id, rawLabel) => {
+  const norm = String(rawLabel || '').toLowerCase()
+  if (id === 2 || norm.includes('accepté') || norm.includes('accepted')) return 'paiement effectué'
+  if (id === 5 || norm.includes('livré') || norm.includes('delivered')) return 'livré'
+  if (id === 6 || norm.includes('annulé') || norm.includes('cancel')) return 'annulé'
+  return rawLabel || `Statut #${id}`
+}
+
 export const loadCustomerOrders = async (customerId) => {
   if (!customerId && customerId !== 0) throw new Error('customerId requis')
 
@@ -44,15 +52,18 @@ export const loadCustomerOrders = async (customerId) => {
   const items = extractItems(response, api.resource)
   const statuses = await getStatusMap()
 
-  return items.map(order => ({
-    id: parseInt(order.id),
-    customerId: parseInt(order.id_customer),
-    reference: order.reference || `#${order.id}`,
-    statusId: parseInt(order.current_state || 0),
-    statusLabel: statuses[parseInt(order.current_state || 0)] || `Statut #${order.current_state}`,
-    totalPaid: parseFloat(order.total_paid || 0).toFixed(2),
-    dateAdd: order.date_add,
-  }))
+  return items.map(order => {
+    const statusId = parseInt(order.current_state || 0)
+    return {
+      id: parseInt(order.id),
+      customerId: parseInt(order.id_customer),
+      reference: order.reference || `#${order.id}`,
+      statusId,
+      statusLabel: mapStatusLabel(statusId, statuses[statusId]),
+      totalPaid: parseFloat(order.total_paid || 0).toFixed(2),
+      dateAdd: order.date_add,
+    }
+  })
 }
 
 export const loadCustomerOrderDetail = async (customerId, orderId) => {
@@ -84,19 +95,23 @@ export const loadCustomerOrderDetail = async (customerId, orderId) => {
     totalPrice: parseFloat(line.total_price_tax_incl || 0).toFixed(2),
   }))
 
-  const histories = extractItems(historiesResponse, resourceApi('order_histories').resource).map(history => ({
-    id: parseInt(history.id || 0),
-    stateId: parseInt(history.id_order_state || 0),
-    stateLabel: statusMap[parseInt(history.id_order_state || 0)] || `Statut #${history.id_order_state}`,
-    dateAdd: history.date_add,
-  }))
+  const histories = extractItems(historiesResponse, resourceApi('order_histories').resource).map(history => {
+    const stateId = parseInt(history.id_order_state || 0)
+    return {
+      id: parseInt(history.id || 0),
+      stateId,
+      stateLabel: mapStatusLabel(stateId, statusMap[stateId]),
+      dateAdd: history.date_add,
+    }
+  })
 
+  const currentStatusId = parseInt(order.current_state || 0)
   return {
     order: {
       id: parseInt(order.id),
       reference: order.reference || `#${order.id}`,
-      statusId: parseInt(order.current_state || 0),
-      statusLabel: statusMap[parseInt(order.current_state || 0)] || `Statut #${order.current_state}`,
+      statusId: currentStatusId,
+      statusLabel: mapStatusLabel(currentStatusId, statusMap[currentStatusId]),
       totalPaid: parseFloat(order.total_paid || 0).toFixed(2),
       dateAdd: order.date_add,
       payment: order.payment,
