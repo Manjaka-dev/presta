@@ -135,7 +135,8 @@ export async function createOrderFromCsvRow(row, config) {
             productAttributeId: item.productAttributeId || 0,
             quantity: -item.quantity, // Quantité négative pour retirer du stock
             reasonId: 3, // 3 = Customer Order
-            employeeId: 1
+            employeeId: 1,
+            warehouseId: config.warehouseId  // ← REQUIS par PrestaShop
         })
     } catch(e) {
         console.warn(`[commandeService] Impossible de décrémenter le stock pour la commande ${orderId}`, e)

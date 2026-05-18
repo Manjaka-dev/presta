@@ -79,44 +79,56 @@ export const updateStockMovementDate = async (movementId, date) => {
 /**
  * Crée un mouvement de stock (ajout ou retrait).
  * C'est la méthode correcte pour une gestion de stock traçable.
- * @param {{productId: string, productAttributeId: string|number, quantity: number, reasonId: string, employeeId: number, dateAdd: string}} data
+ * @param {{productId: string, productAttributeId: string|number, quantity: number, reasonId: string, employeeId: number, dateAdd: string, warehouseId: number}} data
  */
-export const createStockMovement = async ({ productId, productAttributeId = 0, quantity, reasonId, employeeId = 1, dateAdd = null }) => {
+export const createStockMovement = async ({ productId, productAttributeId = 0, quantity, reasonId, employeeId = 1, dateAdd = null, warehouseId = 1 }) => {
   if (!productId || !reasonId || quantity === 0) {
     throw new Error('Informations manquantes pour créer le mouvement de stock.')
   }
 
   // 1. Récupérer l'id_stock correspondant au produit/déclinaison
-  // On passe en priorité par l'API stock_availables qui est plus fiable et bien mappée
-  const stockAvail = await loadStockAvailable(productId, productAttributeId)
+  // ⚠️ Stratégie : Chercher par product+attribute, sinon fallback à API stocks
+  let stockId = null
 
-  let stockId;
+  // Essai 1 : API stock_availables (fiable pour quantité dispo)
+  const stockAvail = await loadStockAvailable(productId, productAttributeId)
   if (stockAvail && stockAvail.id) {
       stockId = stockAvail.id
-  } else {
-      // Fallback API stocks
+      console.debug(`[createStockMovement] Trouvé via stock_availables: id_stock=${stockId}`)
+  }
+
+  // Essai 2 : Fallback API stocks
+  if (!stockId) {
       const stockApi = resourceApi('stocks')
       const stockResponse = await stockApi.list({
         'filter[id_product]': String(productId),
-        display: '[id,id_product_attribute]',
-        limit: 100,
+        'filter[id_product_attribute]': String(productAttributeId),
+        display: '[id,id_product_attribute,physical_quantity,id_warehouse]',
+        limit: 10,
       })
       const stocks = extractItems(stockResponse, stockApi.resource)
-      // find exact match
-      const exactStock = stocks.find(s => String(s.id_product_attribute) === String(productAttributeId))
       
-      if (exactStock) {
-        stockId = exactStock.id
-      } else if (stocks.length > 0 && String(productAttributeId) === '0') {
-         // si productAttributeId=0, on prend le premier
-         stockId = stocks[0].id
-      } else {
-         throw new Error(`Aucun stock physique trouvé pour ce produit/déclinaison.`)
+      if (stocks.length > 0) {
+        const exactStock = stocks.find(s => String(s.id_product_attribute) === String(productAttributeId))
+        if (exactStock) {
+          stockId = exactStock.id
+          if (exactStock.id_warehouse) warehouseId = exactStock.id_warehouse  // ← Récupérer id_warehouse
+          console.debug(`[createStockMovement] Trouvé via stocks (exact match): id_stock=${stockId}, warehouse=${warehouseId}`)
+        } else {
+          if (String(productAttributeId) === '0' && stocks.length > 0) {
+            stockId = stocks[0].id
+            if (stocks[0].id_warehouse) warehouseId = stocks[0].id_warehouse
+            console.debug(`[createStockMovement] Trouvé via stocks (fallback): id_stock=${stockId}, warehouse=${warehouseId}`)
+          }
+        }
       }
   }
 
+  if (!stockId) {
+      throw new Error(`Aucun stock trouvé pour produit=${productId}, attribut=${productAttributeId}.`)
+  }
 
-  // 2. Préparer le payload XML pour la création du mouvement
+  // 2. Préparer le payload XML - AVEC id_warehouse (REQUIS par PrestaShop)
   const sign = quantity > 0 ? 1 : -1
   const physicalQuantity = Math.abs(quantity)
   const now = dateAdd || new Date().toISOString().slice(0, 19).replace('T', ' ')
@@ -126,6 +138,7 @@ export const createStockMovement = async ({ productId, productAttributeId = 0, q
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <stock_mvt>
     <id_stock>${stockId}</id_stock>
+    <id_warehouse>${warehouseId}</id_warehouse>
     <id_stock_mvt_reason>${reasonId}</id_stock_mvt_reason>
     <id_employee>${employeeId}</id_employee>
     <physical_quantity>${physicalQuantity}</physical_quantity>

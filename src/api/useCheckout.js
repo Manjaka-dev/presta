@@ -151,19 +151,28 @@ export const deleteCart = async (cartId) => {
 }
 
 const buildOrderXml = async (orderData) => {
-  const { customerId, paymentModule, addressId, cartId, statusId, secureKey } = orderData
+   const { customerId, paymentModule, addressId, cartId, statusId, secureKey, items: preFetchedItems } = orderData
 
-  if (!customerId || !addressId || !cartId) {
-    throw new Error('Missing data for order creation')
-  }
+   if (!customerId || !addressId || !cartId) {
+     throw new Error('Missing data for order creation')
+   }
 
-  // 1. Récupérer les détails complets du panier depuis PrestaShop
-  const cartDetails = await getCartDetails(cartId)
-  if (!cartDetails.items || cartDetails.items.length === 0) {
-    throw new Error('Le panier est vide ou introuvable sur le serveur')
-  }
+   // 1. Récupérer les détails complets du panier depuis PrestaShop
+   // OPTIMISATION: Si items sont déjà fournis (depuis createOrder), les utiliser directement!
+   let cartDetails
+   if (preFetchedItems && preFetchedItems.length > 0) {
+     console.debug('[buildOrderXml] Utilisation des items pré-chargés depuis createOrder')
+     cartDetails = { items: preFetchedItems }
+   } else {
+     console.debug('[buildOrderXml] Appel getCartDetails (fallback)')
+     cartDetails = await getCartDetails(cartId)
+   }
 
-  // 2. Calcul des taxes et totaux
+   if (!cartDetails.items || cartDetails.items.length === 0) {
+     throw new Error('Le panier est vide ou introuvable sur le serveur')
+   }
+
+   // ...existing code...
   const { totalTaxAmount, itemsWithTax } = await calculateCartTaxes(cartDetails.items)
   const totalProductsHT = itemsWithTax.reduce((sum, item) => sum + ((parseFloat(item.price) || 0) * (parseInt(item.quantity, 10) || 1)), 0)
   const totalPaidTTC = totalProductsHT + totalTaxAmount
@@ -189,7 +198,7 @@ const buildOrderXml = async (orderData) => {
         </order_row>`
   }).join('')
 
-  const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+  const now = new Date().toLocaleString('sv').slice(0, 19)
 
   // 4. XML complet requis pour que PrestaShop calcule la facture
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -244,42 +253,48 @@ const escapeXml = (text) => {
 }
 
 export const createOrder = async (checkoutData) => {
-  // 1. Récupérer la secure_key du client
-  const customerApi = resourceApi('customers')
-  
-  let customerRes;
-  try {
-      customerRes = await customerApi.get(checkoutData.customerId)
-  } catch(e) {
-      console.warn('[useCheckout] Client non trouvé ou erreur lors de la récupération.', e)
-      // Si le client n'existe pas, on lève une erreur plus explicite
-      throw new Error(`Le client avec l'ID ${checkoutData.customerId} n'existe pas. Veuillez vous reconnecter.`)
-  }
+   // 1. Récupérer les détails du panier IMMÉDIATEMENT pour avoir les items corrects
+   // C'est CRUCIAL pour que les mouvements de stock aient les bonnes propriétés (combinationId, etc.)
+   const cartId = checkoutData.cartId
+   const cartDetails = await getCartDetails(cartId)
 
-  let secureKey = ''
-  const customerObj = customerRes?.customer || customerRes?.customers?.[0] || customerRes?.prestashop?.customer
-  if (customerObj) {
-    if (typeof customerObj.secure_key === 'string') {
-      secureKey = customerObj.secure_key
-    } else if (customerObj.secure_key && typeof customerObj.secure_key === 'object') {
-      secureKey = Object.values(customerObj.secure_key)[0]
-    }
-  } else if (customerRes?.__raw) {
-    const match = customerRes.__raw.match(/<secure_key>(?:<!\[CDATA\[)?(.*?)(?:\\]>)?<\/secure_key>/)
-    if (match) secureKey = match[1]
-  }
+   // 2. Récupérer la secure_key du client
+   const customerApi = resourceApi('customers')
 
-  // PrestaShop peut parfois accepter la création d'une commande sans secure_key
-  // Si le secureKey n'est pas trouvé, on met une valeur factice pour essayer de débloquer la création.
-  if (!secureKey) {
-    console.warn('[useCheckout] Failed to retrieve secure_key from:', customerRes, 'Using dummy value.')
-    secureKey = 'dummy_secure_key_12345'
-  }
+   let customerRes;
+   try {
+       customerRes = await customerApi.get(checkoutData.customerId)
+   } catch(e) {
+       console.warn('[useCheckout] Client non trouvé ou erreur lors de la récupération.', e)
+       // Si le client n'existe pas, on lève une erreur plus explicite
+       throw new Error(`Le client avec l'ID ${checkoutData.customerId} n'existe pas. Veuillez vous reconnecter.`)
+   }
 
-  // 2. Créer l'entité Order directement avec les lignes (associations) et le statut de paiement direct.
-  const orderXml = await buildOrderXml({ ...checkoutData, secureKey })
-  const orderApi = resourceApi('orders')
-  const orderResponse = await orderApi.create(orderXml)
+   let secureKey = ''
+   const customerObj = customerRes?.customer || customerRes?.customers?.[0] || customerRes?.prestashop?.customer
+   if (customerObj) {
+     if (typeof customerObj.secure_key === 'string') {
+       secureKey = customerObj.secure_key
+     } else if (customerObj.secure_key && typeof customerObj.secure_key === 'object') {
+       secureKey = Object.values(customerObj.secure_key)[0]
+     }
+   } else if (customerRes?.__raw) {
+     const match = customerRes.__raw.match(/<secure_key>(?:<!\[CDATA\[)?(.*?)(?:\\]>)?<\/secure_key>/)
+     if (match) secureKey = match[1]
+   }
+
+   // PrestaShop peut parfois accepter la création d'une commande sans secure_key
+   // Si le secureKey n'est pas trouvé, on met une valeur factice pour essayer de débloquer la création.
+   if (!secureKey) {
+     console.warn('[useCheckout] Failed to retrieve secure_key from:', customerRes, 'Using dummy value.')
+     secureKey = 'dummy_secure_key_12345'
+   }
+
+   // 3. Créer l'entité Order directement avec les lignes (associations) et le statut de paiement direct.
+   // ⭐ IMPORTANT: Passer cartDetails.items aussi pour éviter un double appel à getCartDetails
+   const orderXml = await buildOrderXml({ ...checkoutData, secureKey, items: cartDetails.items })
+   const orderApi = resourceApi('orders')
+   const orderResponse = await orderApi.create(orderXml)
 
   const orderIdMatch = orderResponse.match(/<id>[^0-9]*(\d+)[^0-9]*<\/id>/i)
   if (!orderIdMatch) throw new Error('Could not get order ID from response')
@@ -290,25 +305,39 @@ export const createOrder = async (checkoutData) => {
   // Ce code est pour les commandes passées manuellement sur le site (front-office).
   // on utilise la date courante. 
   
-  const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
-  
-  // 3. Décrémenter le stock manuellement et générer l'historique
-  if (checkoutData.items && checkoutData.items.length > 0) {
-      for (const item of checkoutData.items) {
-          try {
-              await createStockMovement({
-                  productId: item.id || item.productId,
-                  productAttributeId: item.combinationId || 0,
-                  quantity: -item.quantity, // Quantité négative pour retirer du stock
-                  reasonId: 3, // 3 = Customer Order
-                  employeeId: 1,
-                  dateAdd: now
-              })
-          } catch(e) {
-              console.warn(`[useCheckout] Impossible de décrémenter le stock pour la commande ${orderId}`, e)
-          }
-      }
-  }
+  const now = new Date().toLocaleString('sv').slice(0, 19)
+
+   // 3. Décrémenter le stock manuellement et générer l'historique
+   // ⚠️ CRITICAL: Utiliser cartDetails.items (importés au début de createOrder)
+   //    car c'est la SEULE source fiable de combinationId!
+   if (cartDetails.items && cartDetails.items.length > 0) {
+       // Reconstruire les items avec productAttributeId EXPLICITEMENT
+       const itemsForStockMove = cartDetails.items.map(item => ({
+           id: item.id,
+           productAttributeId: item.combinationId || 0,  // ← combinationId vient de getCartDetails
+           quantity: item.quantity,
+           name: item.name
+       }))
+
+       for (const item of itemsForStockMove) {
+           try {
+               console.debug(`[useCheckout] Avant stock movement: produit ${item.id}, attribut ${item.productAttributeId}, qty -${item.quantity}`)
+               await createStockMovement({
+                   productId: item.id,
+                   productAttributeId: item.productAttributeId,  // ← Depuis cartDetails.items
+                   quantity: -item.quantity,
+                   reasonId: 3,  // 3 = Customer Order
+                   employeeId: 1,
+                   dateAdd: now
+               })
+               console.debug(`[useCheckout] ✅ Stock décrémenté pour produit ${item.id}, attribut ${item.productAttributeId}, quantité -${item.quantity}`)
+           } catch(e) {
+               console.warn(`[useCheckout] ❌ Impossible de décrémenter le stock pour la commande ${orderId}:`, e.message)
+           }
+       }
+   } else {
+       console.warn(`[useCheckout] ⚠️ Pas d'items pour décrémenter le stock! cartDetails.items:`, cartDetails.items)
+   }
 
   // 4. Ajouter l'historique d'état cible
   if (checkoutData.statusId) {
