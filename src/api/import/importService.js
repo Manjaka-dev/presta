@@ -217,8 +217,17 @@ async function importStocks(rows, progress) {
         const groupId = await ensureProductOptionId(specificite, optionCache)
         const valueId = await ensureProductOptionValueId(groupId, karazany, valueCache)
         
+        // Calculer l'impact de prix
+        const basePriceHt = productInfo.price || 0
+        const csvPrixVenteTtc = toFloat(row.prix_vente_ttc || '0', 0)
+        const taxRate = await getTaxRateByGroupId(productInfo.id_tax_rules_group)
+        const csvPriceHt = taxRate > 0 ? csvPrixVenteTtc / (1 + (taxRate / 100)) : csvPrixVenteTtc
+        
+        const priceImpactVal = csvPriceHt - basePriceHt
+        const priceImpactStr = priceImpactVal.toFixed(2)
+        
         const combinationId = await ensureCombinationId(
-          productInfo, valueId, reference, karazany, '0.00', combinationCache
+          productInfo, valueId, reference, karazany, priceImpactStr, combinationCache
         )
 
         if (!combinationId) {
