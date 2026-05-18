@@ -28,8 +28,8 @@ const fetchStats = async () => {
       apiCategories.list({ display: '[id,name]', limit: 1000 }),
       apiProducts.list({ display: '[id,id_category_default,price,wholesale_price]', limit: 5000 }),
       apiOrderDetails.list({ display: '[id,id_order,product_id,product_quantity,product_price,total_price_tax_excl,purchase_supplier_price]', limit: 5000 }),
-      apiStock.list({ display: '[id,id_product,quantity]', limit: 5000 }), // Removed physical_quantity and reserved_quantity
-      apiOrders.list({ display: '[id,valid]', limit: 5000 })
+      apiStock.list({ display: '[id,id_product,id_product_attribute,quantity]', limit: 5000 }),
+      apiOrders.list({ display: '[id,valid,current_state]', limit: 5000 })
     ])
 
     const categories = extractItems(catRes, apiCategories.resource)
@@ -51,11 +51,13 @@ const fetchStats = async () => {
     })
     state.categories = catMap
 
-    // Build valid orders map
-    const validOrdersMap = {}
+    // Build orders map with validity and status
+    const ordersMap = {}
     orders.forEach(o => {
-      // PrestaShop considers valid=1 for paid orders
-      validOrdersMap[o.id] = o.valid === '1'
+      ordersMap[o.id] = {
+        valid: o.valid === '1',
+        statusId: parseInt(o.current_state || 0)
+      }
     })
 
     // Build products map
@@ -68,15 +70,13 @@ const fetchStats = async () => {
       }
     })
 
-    // Calculate Sales and Purchases from Order Details
+    // Calculate Sales, Purchases, and Reserved stock from Order Details
     let sumSales = 0
     let sumPurchases = 0
     const profitByCat = {}
+    const reservedQuantityByProduct = {}
 
     orderDetails.forEach(od => {
-      // Optional: only consider valid orders
-      // if (!validOrdersMap[od.id_order]) return;
-
       const pId = od.product_id
       const qty = parseInt(od.product_quantity) || 0
       const salePrice = parseFloat(od.product_price) || 0 // unit price
@@ -98,6 +98,16 @@ const fetchStats = async () => {
       profitByCat[catId].sales += totalSale
       profitByCat[catId].purchases += totalPurchaseForOd
       profitByCat[catId].profit += (totalSale - totalPurchaseForOd)
+
+      // Calculate reserved quantity: order exists, status is not livré (5) and not annulé (6)
+      const order = ordersMap[od.id_order]
+      const statusId = order ? order.statusId : 0
+      if (statusId !== 5 && statusId !== 6) {
+        if (!reservedQuantityByProduct[pId]) {
+          reservedQuantityByProduct[pId] = 0
+        }
+        reservedQuantityByProduct[pId] += qty
+      }
     })
 
     state.totalSales = sumSales
@@ -107,15 +117,23 @@ const fetchStats = async () => {
     // Calculate Stock by Category
     const stockByCat = {}
     stocks.forEach(st => {
+      // Skip stock for combinations to get the total product stock (id_product_attribute = 0)
+      if (String(st.id_product_attribute) !== '0') return
+
       const pId = st.id_product
-      // Skip stock for combinations if you only want main product stock (id_product_attribute = 0)
-      // Usually stock_availables groups them or gives specific rows. Let's aggregate by product.
       const catId = prodMap[pId] ? prodMap[pId].categoryId : 'unknown'
 
       if (!stockByCat[catId]) {
-        stockByCat[catId] = { available: 0 }
+        stockByCat[catId] = { physical: 0, reserved: 0, available: 0 }
       }
-      stockByCat[catId].available += parseInt(st.quantity || 0)
+
+      const available = parseInt(st.quantity || 0)
+      const reserved = reservedQuantityByProduct[pId] || 0
+      const physical = available + reserved
+
+      stockByCat[catId].physical += physical
+      stockByCat[catId].reserved += reserved
+      stockByCat[catId].available += available
     })
 
     state.stockByCategory = stockByCat
@@ -207,16 +225,20 @@ const formatEur = (amount) => {
             <thead>
               <tr>
                 <th>Catégorie</th>
-                <th>Quantité Disponible</th>
+                <th>Qté physique</th>
+                <th>Qté réservée</th>
+                <th>Qté disponible</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="(stock, catId) in state.stockByCategory" :key="'stock-'+catId">
                 <td>{{ state.categories[catId] || 'Inconnue (ID: ' + catId + ')' }}</td>
+                <td>{{ stock.physical }}</td>
+                <td>{{ stock.reserved }}</td>
                 <td>{{ stock.available }}</td>
               </tr>
               <tr v-if="Object.keys(state.stockByCategory).length === 0">
-                <td colspan="2" class="text-center">Aucune donnée de stock disponible.</td>
+                <td colspan="4" class="text-center">Aucune donnée de stock disponible.</td>
               </tr>
             </tbody>
           </table>

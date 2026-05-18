@@ -3,6 +3,7 @@ import { reactive } from 'vue'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
 import { createOrder, deleteOrder, getCartDetails, calculateCartTotal } from '@/api/useCheckout'
+import { requestXml } from '@/api/httpClient'
 
 // Tous les statuts disponibles
 const EDITABLE_STATUSES = reactive({})
@@ -169,20 +170,22 @@ const getStatusLabel = (statusId) => {
 }
 
 const isEditableStatus = (statusId) => {
-  return statusId === 2 || statusId === 5 || statusId === 6
+  // Seules les commandes "paiement effectué" (2) et "annulé" (6) peuvent être modifiées
+  // On ne peut pas changer le statut "dans le panier" ('cart') depuis le backoffice
+  return statusId === 2 || statusId === 6
 }
 
 const getAvailableTransitions = (statusId) => {
   const transitions = []
   if (statusId === 2) {
+    // Depuis paiement effectué, on peut passer à livré (5) ou annulé (6)
     transitions.push({ id: 5, label: EDITABLE_STATUSES[5] || 'livré' })
-    transitions.push({ id: 6, label: EDITABLE_STATUSES[6] || 'annulé' })
-  } else if (statusId === 5) {
     transitions.push({ id: 6, label: EDITABLE_STATUSES[6] || 'annulé' })
   } else if (statusId === 6) {
+    // Depuis annulé, on peut repasser à paiement effectué (2)
     transitions.push({ id: 2, label: EDITABLE_STATUSES[2] || 'paiement effectué' })
-    transitions.push({ id: 5, label: EDITABLE_STATUSES[5] || 'livré' })
   }
+  // Les autres statuts n'ont pas de transitions définies
   return transitions
 }
 
@@ -209,7 +212,7 @@ const saveStatus = async () => {
   const toStatus = editing.statusId
 
   try {
-    // --- CAS 1 : Panier → Commande (payée ou annulée) ---
+    // --- CAS 1 : Panier → Commande (payée) ---
     if (fromStatus === 'cart' && toStatus !== 'cart') {
       const statusId = parseInt(toStatus)
       // Récupérer les infos du panier pour construire la commande
@@ -232,16 +235,22 @@ const saveStatus = async () => {
     // --- CAS 3 : Changement de statut simple (payée ↔ annulée etc.) ---
     else if (fromStatus !== 'cart' && toStatus !== 'cart') {
       const statusId = parseInt(toStatus)
-      const api = resourceApi('orders')
+      // format date as standard PrestaShop YYYY-MM-DD HH:mm:ss datetime
+      const datetimeStr = new Date().toLocaleString('sv').slice(0, 19)
+
       const xmlBody = `<?xml version="1.0" encoding="UTF-8"?>
-<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
-  <order>
-    <id>${order.id}</id>
-    <current_state>${statusId}</current_state>
-  </order>
+<prestashop>
+  <manual_order_state>
+    <id_order>${order.id}</id_order>
+    <id_order_state>${statusId}</id_order_state>
+    <id_employee>1</id_employee>
+    <date>${datetimeStr}</date>
+  </manual_order_state>
 </prestashop>`
-      await api.patch(order.id, xmlBody)
-      console.info('[OrdersBackoffice] status patched', { orderId: order.id, statusId })
+
+      // Utilisation de l'API custom qui gère elle-même les mouvements de stock et mises à jour
+      await requestXml('POST', 'custom_order_state', xmlBody)
+      console.info('[OrdersBackoffice] status created in custom_order_state', { orderId: order.id, statusId })
     }
 
     // Recharger la liste pour refléter l'état réel
