@@ -14,6 +14,47 @@ import { buildOrderConfig, createOrderFromCsvRow, validateOrderConfig } from './
 import { slugify, toFloat, toInt, formatMoney } from '@/utils/stringUtils'
 import { ensureTaxSystem, getTaxRateByGroupId } from './taxesService'
 
+export const ENABLE_NEGATIVE_STOCK_CHECK = true;
+
+function validateData(target, rows) {
+  const dateRegex = /^\d{2}\/\d{2}\/\d{4}$/
+  
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    
+    let dateStr = ''
+    if (target === 'products' || target === 'stocks') {
+      dateStr = row.date_availability_produit || row.date_produit || row.date || ''
+    } else if (target === 'orders') {
+      dateStr = row.date || ''
+    }
+    
+    // Validation de la date: exigée pour products et orders, ou si présente pour stocks
+    if ((target === 'products' || target === 'orders') || (target === 'stocks' && dateStr)) {
+      if (!dateStr || !dateRegex.test(dateStr.trim())) {
+        throw new Error(`Format de date invalide ou manquant (DD/MM/YYYY attendu) à la ligne ${i + 1}`)
+      }
+    }
+    
+    // Validation des montants négatifs
+    if (target === 'products') {
+      const prixTtc = toFloat(row.prix_ttc || '0', 0)
+      const prixAchat = toFloat(row.prix_achat || '0', 0)
+      if (prixTtc < 0 || prixAchat < 0) {
+        throw new Error(`Montant négatif interdit à la ligne ${i + 1}`)
+      }
+    }
+    
+    if (target === 'stocks' && ENABLE_NEGATIVE_STOCK_CHECK) {
+      const stock = toInt(row.stock_initial || '0', 0)
+      const prixVenteTtc = toFloat(row.prix_vente_ttc || '0', 0)
+      if (stock < 0 || prixVenteTtc < 0) {
+        throw new Error(`Stock ou montant négatif interdit à la ligne ${i + 1}`)
+      }
+    }
+  }
+}
+
 /**
  * Point d'entrée principal
  * @param {{ target: string, rows?: Array, files?: FileList|Array, onProgress?: Function }} options
@@ -30,6 +71,10 @@ export async function runImport({ target, rows = [], files = [], onProgress }) {
   if (!Array.isArray(rows)) {
     throw new Error('CSV rows manquants')
   }
+
+  // Validation stricte des données avant tout traitement
+  validateData(target, rows)
+
   if (target === 'products') {
     return importProducts(rows, progress)
   }

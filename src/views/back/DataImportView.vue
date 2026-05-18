@@ -1,12 +1,13 @@
 <script setup>
 import { ref, reactive } from 'vue'
-import { parseCsvFile } from '@/api/import/csvParser'
+import { parseCsvFile, validateHeaders } from '@/api/import/csvParser'
 import { runImport } from '@/api/import/importService'
+import { runReset } from '@/api/import/resetService'
 
 const sections = reactive({
-  products: { file: null, rows: [], status: '', running: false, result: null },
-  stocks: { file: null, rows: [], status: '', running: false, result: null },
-  orders: { file: null, rows: [], status: '', running: false, result: null },
+  products: { file: null, rows: [], headers: [], status: '', running: false, result: null },
+  stocks: { file: null, rows: [], headers: [], status: '', running: false, result: null },
+  orders: { file: null, rows: [], headers: [], status: '', running: false, result: null },
   images: { files: [], status: '', running: false, result: null }
 })
 
@@ -21,12 +22,14 @@ async function onCsvSelected(section, event) {
   const file = event.target?.files?.[0]
   section.file = file || null
   section.rows = []
+  section.headers = []
   section.status = ''
   section.result = null
   if (!file) return
   try {
     const parsed = await parseCsvFile(file)
     section.rows = parsed.rows
+    section.headers = parsed.normalizedHeaders
     section.status = `${parsed.rows.length} ligne(s) chargée(s)`
   } catch (error) {
     section.status = `Erreur de parsing: ${error.message}`
@@ -64,6 +67,10 @@ async function startImport(target) {
   addLog(`▶ Début import ${target}`)
 
   try {
+    if (target !== 'images') {
+      validateHeaders(target, section.headers)
+    }
+
     const result = await runImport({
       target,
       rows: section.rows,
@@ -76,6 +83,7 @@ async function startImport(target) {
   } catch (error) {
     section.status = `Erreur: ${error.message}`
     addLog(`❌ Import ${target} échoué: ${error.message}`)
+    throw error // Re-throw to be caught by startAll or handle reset here
   } finally {
     section.running = false
   }
@@ -95,12 +103,22 @@ async function startAll() {
     { target: 'images', label: 'Images' }
   ]
 
-  for (const step of steps) {
-    const section = sections[step.target]
-    const hasData = step.target === 'images' ? section.files.length > 0 : section.rows.length > 0
-    if (hasData) {
-      addLog(`━━━ ${step.label} ━━━`)
-      await startImport(step.target)
+  try {
+    for (const step of steps) {
+      const section = sections[step.target]
+      const hasData = step.target === 'images' ? section.files.length > 0 : section.rows.length > 0
+      if (hasData) {
+        addLog(`━━━ ${step.label} ━━━`)
+        await startImport(step.target)
+      }
+    }
+  } catch (error) {
+    addLog(`🛑 IMPORT ARRÊTÉ SUITE À UNE ERREUR CRITIQUE. Lancement du Rollback...`)
+    try {
+      await runReset()
+      addLog(`♻️ Base de données réinitialisée (Rollback terminé)`)
+    } catch (resetErr) {
+      addLog(`❌ Échec critique lors du Rollback: ${resetErr.message}`)
     }
   }
 

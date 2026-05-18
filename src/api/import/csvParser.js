@@ -4,6 +4,28 @@
  */
 import { normalizeHeader } from '@/utils/stringUtils'
 
+export const EXPECTED_HEADERS = {
+  products: ['date_availability_produit', 'nom', 'reference', 'prix_ttc', 'taxe', 'categorie', 'prix_achat'],
+  stocks: ['reference', 'specificite', 'karazany', 'stock_initial', 'prix_vente_ttc'],
+  orders: ['date', 'nom', 'email', 'pwd', 'adresse', 'achat', 'etat']
+}
+
+export function validateHeaders(target, normalizedHeaders) {
+  const expected = EXPECTED_HEADERS[target]
+  if (!expected) return // Target inconnu, on ignore la validation
+  
+  const missing = []
+  for (const req of expected) {
+    if (!normalizedHeaders.includes(req)) {
+      missing.push(req)
+    }
+  }
+  
+  if (missing.length > 0) {
+    throw new Error(`Colonnes manquantes ou mal orthographiées pour "${target}": ${missing.join(', ')}`)
+  }
+}
+
 export async function parseCsvFile(file) {
   const text = await file.text()
   return parseCsvText(text)
