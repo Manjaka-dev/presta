@@ -16,6 +16,7 @@ import { toInt } from '@/utils/stringUtils'
 import { getText, parseXml } from '@/utils/xmlUtils'
 import { calculateCartTaxes, createCart as createCartFromCheckout } from '../useCheckout' // Importer la fonction de calcul de taxe et createCart
 import { createStockMovement } from '../stockService'
+import { requestXml } from '@/api/httpClient'
 
 function toIsoDateTime(raw) {
   if (!raw) return null
@@ -26,12 +27,187 @@ function toIsoDateTime(raw) {
   return `${year.padStart(4, '0')}-${month.padStart(2, '0')}-${day.padStart(2, '0')} 12:00:00`
 }
 
-export async function createOrderFromCsvRow(row, config) {
+function getNormalizedStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  if (!normalized || normalized.includes('panier')) {
+    return 'cart'
+  }
+  if (normalized.includes('accepte') || normalized.includes('effectue') || normalized.includes('payer') || normalized.includes('payee') || normalized.includes('paye')) {
+    return 'paid'
+  }
+  if (normalized.includes('annul')) {
+    return 'cancelled'
+  }
+  if (normalized.includes('livre')) {
+    return 'delivered'
+  }
+  return 'pending'
+}
+
+async function changeOrderStatusCustom(orderId, targetStatusId, dateStr) {
+  const datetimeStr = dateStr || new Date().toLocaleString('sv').slice(0, 19)
+  const xmlBody = `<?xml version="1.0" encoding="UTF-8"?>
+<prestashop>
+  <manual_order_state>
+    <id_order>${orderId}</id_order>
+    <id_order_state>${targetStatusId}</id_order_state>
+    <id_employee>1</id_employee>
+    <date>${datetimeStr}</date>
+  </manual_order_state>
+</prestashop>`
+  await requestXml('POST', 'custom_order_state', xmlBody)
+}
+
+export async function createOrderFromCsvRow(row, config, cache = null) {
   const orderItems = parseOrderItems(row.achat)
   if (!orderItems.length) {
     throw new Error('Champ achat vide ou invalide')
   }
 
+  const email = row.email?.trim() || ''
+  const purchase = row.achat?.trim() || ''
+  const orderSignature = `${email.toLowerCase()}_${purchase}`
+
+  const statusType = getNormalizedStatus(row.etat)
+  const orderDate = toIsoDateTime(row.date) || new Date().toISOString().slice(0, 19).replace('T', ' ')
+
+  // 1. Gestion avec cache (mise à jour séquentielle)
+  if (cache && cache.has(orderSignature)) {
+    const existing = cache.get(orderSignature)
+
+    // Sous-cas B1: Était un panier simple, maintenant promu en commande
+    if (!existing.orderId) {
+      if (statusType === 'cart') {
+        return `Panier ${existing.cartId} (déjà existant)`
+      }
+
+      const totals = await computeOrderTotals(existing.resolvedItems)
+      const orderId = await createOrderEntity({
+        id_cart: existing.cartId,
+        id_currency: config.currencyId,
+        id_lang: config.langId,
+        id_customer: existing.customerId,
+        id_address_delivery: existing.addressId,
+        id_address_invoice: existing.addressId,
+        id_carrier: config.carrierId,
+        id_shop: config.shopId,
+        id_shop_group: config.shopGroupId,
+        current_state: config.orderStatePaidId, // Toujours valider le paiement en premier !
+        payment: 'Paiement a la livraison',
+        module: config.cashModule,
+        total_paid: totals.totalPaid,
+        total_paid_real: totals.totalPaid,
+        total_paid_tax_incl: totals.totalPaid,
+        total_paid_tax_excl: totals.totalProducts,
+        total_products: totals.totalProducts,
+        total_products_wt: totals.totalPaid,
+        total_discounts: "0.00",
+        total_discounts_tax_incl: "0.00",
+        total_discounts_tax_excl: "0.00",
+        total_shipping: "0.00",
+        total_shipping_tax_incl: "0.00",
+        total_shipping_tax_excl: "0.00",
+        total_wrapping: "0.00",
+        total_wrapping_tax_incl: "0.00",
+        total_wrapping_tax_excl: "0.00",
+        secure_key: existing.secureKey,
+        conversion_rate: 1,
+        date_add: orderDate,
+        date_upd: orderDate
+      })
+
+      if (row.date) {
+        try {
+          await updateOrderDate(orderId, orderDate)
+        } catch(e) {
+          console.warn(`[commandeService] Impossible de patcher la date pour la commande ${orderId}`, e)
+        }
+      }
+
+      const { itemsWithTax } = await calculateCartTaxes(existing.resolvedItems)
+
+      for (const item of itemsWithTax) {
+        const lineName = item.karazany ? `${item.name} (${item.karazany})` : item.name
+        const unitPriceHT = formatMoney(item.price)
+        const unitPriceTTC = formatMoney(item.price * (1 + item.taxRate / 100))
+        const lineTotalHT = formatMoney(item.price * item.quantity)
+        const lineTotalTTC = formatMoney((item.price * (1 + item.taxRate / 100)) * item.quantity)
+
+        await createOrderDetail({
+          id_order: orderId,
+          product_id: item.id,
+          product_attribute_id: item.productAttributeId || 0,
+          product_name: lineName,
+          product_reference: item.reference,
+          product_quantity: item.quantity,
+          product_price: unitPriceHT,
+          unit_price_tax_incl: unitPriceTTC,
+          unit_price_tax_excl: unitPriceHT,
+          total_price_tax_incl: lineTotalTTC,
+          total_price_tax_excl: lineTotalHT,
+          id_warehouse: config.warehouseId,
+          id_shop: config.shopId
+        })
+        
+        try {
+          await createStockMovement({
+            productId: item.id,
+            productAttributeId: item.productAttributeId || 0,
+            quantity: -item.quantity,
+            reasonId: 3,
+            employeeId: 1,
+            warehouseId: config.warehouseId
+          })
+        } catch(e) {
+          console.warn(`[commandeService] Impossible de décrémenter le stock pour la commande ${orderId}`, e)
+        }
+      }
+
+      await createOrderHistory({
+        id_order: orderId,
+        id_order_state: config.orderStatePaidId,
+        date_add: orderDate
+      })
+
+      let finalStatusId = config.orderStatePaidId
+      if (statusType === 'cancelled') {
+        finalStatusId = 6
+        await changeOrderStatusCustom(orderId, 6, orderDate)
+      } else if (statusType === 'delivered') {
+        finalStatusId = 5
+        await changeOrderStatusCustom(orderId, 5, orderDate)
+      }
+
+      existing.orderId = orderId
+      existing.currentState = finalStatusId
+
+      return `Commande ${orderId} (promue depuis panier, statut: ${statusType})`
+    }
+
+    // Sous-cas B2: Commande déjà créée
+    if (statusType === 'cart') {
+      return `Commande ${existing.orderId} (déjà créée, transition panier ignorée)`
+    }
+
+    let targetStatusId = config.orderStatePaidId
+    if (statusType === 'cancelled') {
+      targetStatusId = 6
+    } else if (statusType === 'delivered') {
+      targetStatusId = 5
+    }
+
+    if (existing.currentState === targetStatusId) {
+      return `Commande ${existing.orderId} (statut déjà ${statusType})`
+    }
+
+    await changeOrderStatusCustom(existing.orderId, targetStatusId, orderDate)
+    existing.currentState = targetStatusId
+
+    return `Commande ${existing.orderId} (statut mis à jour vers: ${statusType} le ${row.date})`
+  }
+
+  // 2. Flux standard (première fois qu'on voit cet achat de ce client)
   const customerId = await ensureCustomer(row, config)
   const secureKey = await fetchCustomerSecureKey(customerId)
   if (!secureKey) {
@@ -46,17 +222,22 @@ export async function createOrderFromCsvRow(row, config) {
 
   const cartId = await createCartForOrder(customerId, addressId, resolvedItems, config)
 
-  const normalizedEtat = String(row.etat || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-
-  if (!normalizedEtat || normalizedEtat.includes('panier')) {
-    return `Panier ${cartId}` // On s'arrête ici, la commande n'est pas créée !
+  if (statusType === 'cart') {
+    if (cache) {
+      cache.set(orderSignature, {
+        cartId,
+        orderId: null,
+        customerId,
+        secureKey,
+        addressId,
+        resolvedItems,
+        currentState: 'cart'
+      })
+    }
+    return `Panier ${cartId}`
   }
 
-
-  const totals = await computeOrderTotals(resolvedItems) // Await this async function
-  const orderStateId = resolveOrderStateId(row.etat, config)
-  
-  const orderDate = toIsoDateTime(row.date) || new Date().toISOString().slice(0, 19).replace('T', ' ')
+  const totals = await computeOrderTotals(resolvedItems)
 
   const orderId = await createOrderEntity({
     id_cart: cartId,
@@ -68,15 +249,15 @@ export async function createOrderFromCsvRow(row, config) {
     id_carrier: config.carrierId,
     id_shop: config.shopId,
     id_shop_group: config.shopGroupId,
-    current_state: orderStateId, // Créé à l'état cible directement
+    current_state: config.orderStatePaidId, // Toujours créé à l'état payé d'abord !
     payment: 'Paiement a la livraison',
     module: config.cashModule,
     total_paid: totals.totalPaid,
     total_paid_real: totals.totalPaid,
     total_paid_tax_incl: totals.totalPaid,
-    total_paid_tax_excl: totals.totalProducts, // HT
-    total_products: totals.totalProducts, // HT
-    total_products_wt: totals.totalPaid, // TTC
+    total_paid_tax_excl: totals.totalProducts,
+    total_products: totals.totalProducts,
+    total_products_wt: totals.totalPaid,
     total_discounts: "0.00",
     total_discounts_tax_incl: "0.00",
     total_discounts_tax_excl: "0.00",
@@ -92,16 +273,13 @@ export async function createOrderFromCsvRow(row, config) {
     date_upd: orderDate
   })
 
-  // Patch: PrestaShop n'autorise parfois pas de forcer la date de création lors du POST (création) 
-  // car le constructeur d'ObjectModel la force. On tente un PUT pour forcer la date
   if (row.date) {
-      try {
-          await updateOrderDate(orderId, orderDate)
-      } catch(e) {
-          console.warn(`[commandeService] Impossible de patcher la date pour la commande ${orderId}`, e)
-      }
+    try {
+      await updateOrderDate(orderId, orderDate)
+    } catch(e) {
+      console.warn(`[commandeService] Impossible de patcher la date pour la commande ${orderId}`, e)
+    }
   }
-
 
   const { itemsWithTax } = await calculateCartTaxes(resolvedItems)
 
@@ -128,27 +306,46 @@ export async function createOrderFromCsvRow(row, config) {
       id_shop: config.shopId
     })
     
-    // Décrémenter le stock manuellement
     try {
-        await createStockMovement({
-            productId: item.id,
-            productAttributeId: item.productAttributeId || 0,
-            quantity: -item.quantity, // Quantité négative pour retirer du stock
-            reasonId: 3, // 3 = Customer Order
-            employeeId: 1,
-            warehouseId: config.warehouseId  // ← REQUIS par PrestaShop
-        })
+      await createStockMovement({
+        productId: item.id,
+        productAttributeId: item.productAttributeId || 0,
+        quantity: -item.quantity,
+        reasonId: 3,
+        employeeId: 1,
+        warehouseId: config.warehouseId
+      })
     } catch(e) {
-        console.warn(`[commandeService] Impossible de décrémenter le stock pour la commande ${orderId}`, e)
+      console.warn(`[commandeService] Impossible de décrémenter le stock pour la commande ${orderId}`, e)
     }
   }
 
-  // Historique de l'état cible (pour afficher le bon état dans l'admin)
   await createOrderHistory({
     id_order: orderId,
-    id_order_state: orderStateId,
+    id_order_state: config.orderStatePaidId,
     date_add: orderDate
   })
+
+  let finalStatusId = config.orderStatePaidId
+  if (statusType === 'cancelled') {
+    finalStatusId = 6
+    await changeOrderStatusCustom(orderId, 6, orderDate)
+  } else if (statusType === 'delivered') {
+    finalStatusId = 5
+    await changeOrderStatusCustom(orderId, 5, orderDate)
+  }
+
+  if (cache) {
+    cache.set(orderSignature, {
+      cartId,
+      orderId,
+      customerId,
+      secureKey,
+      addressId,
+      resolvedItems,
+      currentState: finalStatusId
+    })
+  }
 
   return `Commande ${orderId}`
 }

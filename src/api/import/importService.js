@@ -264,6 +264,7 @@ async function importStocks(rows, progress) {
 async function importOrders(rows, progress) {
   let success = 0
   const config = buildOrderConfig()
+  const cache = new Map()
   
   try {
     validateOrderConfig(config)
@@ -275,8 +276,8 @@ async function importOrders(rows, progress) {
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index]
     try {
-      const result = await createOrderFromCsvRow(row, config)
-      progress(`Commande ligne ${index + 1}: créée avec succès (${result})`)
+      const result = await createOrderFromCsvRow(row, config, cache)
+      progress(`Commande ligne ${index + 1}: traitée avec succès (${result})`)
       success += 1
     } catch (error) {
       progress(`Commande ligne ${index + 1}: ERREUR — ${formatError(error)}`)
