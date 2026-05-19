@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, onMounted } from 'vue'
+import { reactive, onMounted, computed } from 'vue'
 import { resourceApi } from '@/api/resources'
 import { extractItems } from '@/utils/resourceData.js'
 
@@ -22,14 +22,16 @@ const fetchStats = async () => {
     const apiOrderDetails = resourceApi('order_details')
     const apiStock = resourceApi('stock_availables')
     const apiOrders = resourceApi('orders')
+    const apiStockMvts = resourceApi('stock_movements')
 
     // Fetch data concurrently
-    const [catRes, prodRes, orderDetailsRes, stockRes, ordersRes] = await Promise.all([
+    const [catRes, prodRes, orderDetailsRes, stockRes, ordersRes, stockMvtsRes] = await Promise.all([
       apiCategories.list({ display: '[id,name]', limit: 1000 }),
       apiProducts.list({ display: '[id,id_category_default,price,wholesale_price]', limit: 5000 }),
       apiOrderDetails.list({ display: '[id,id_order,product_id,product_quantity,product_price,total_price_tax_excl,purchase_supplier_price,original_wholesale_price]', limit: 5000 }),
       apiStock.list({ display: '[id,id_product,id_product_attribute,quantity]', limit: 5000 }),
-      apiOrders.list({ display: '[id,valid,current_state,total_paid_tax_excl,total_products]', limit: 5000 })
+      apiOrders.list({ display: '[id,valid,current_state,total_paid_tax_excl,total_products]', limit: 5000 }),
+      apiStockMvts.list({ display: '[id_stock,id_order,physical_quantity,sign]', limit: 5000 })
     ])
 
     const categories = extractItems(catRes, apiCategories.resource)
@@ -37,6 +39,34 @@ const fetchStats = async () => {
     const orderDetails = extractItems(orderDetailsRes, apiOrderDetails.resource)
     const stocks = extractItems(stockRes, apiStock.resource)
     const orders = extractItems(ordersRes, apiOrders.resource)
+
+    // Robust extraction of stock movements
+    let stockMvts = []
+    if (stockMvtsRes) {
+      let data = stockMvtsRes
+      if (data.prestashop) data = data.prestashop
+      let mvtsContainer = data.stock_mvts || data.stock_mvt
+      if (mvtsContainer) {
+        if (Array.isArray(mvtsContainer)) {
+          stockMvts = mvtsContainer
+        } else if (mvtsContainer.stock_mvt) {
+          stockMvts = Array.isArray(mvtsContainer.stock_mvt) ? mvtsContainer.stock_mvt : [mvtsContainer.stock_mvt]
+        } else {
+          stockMvts = [mvtsContainer]
+        }
+      }
+    }
+
+    // Helper to get robust values from fields that might be strings, numbers or object wrappers
+    const getVal = (field) => {
+      if (field === null || field === undefined) return 0
+      if (typeof field === 'object') {
+        if (field['#text'] !== undefined) return parseInt(field['#text']) || 0
+        const vals = Object.values(field)
+        if (vals.length) return parseInt(vals[0]) || 0
+      }
+      return parseInt(field) || 0
+    }
 
     // Build categories map
     const catMap = {}
@@ -55,7 +85,7 @@ const fetchStats = async () => {
     const ordersMap = {}
     orders.forEach(o => {
       ordersMap[o.id] = {
-        valid: o.valid === '1',
+        valid: String(o.valid) === '1' || o.valid === 1 || o.valid === true,
         statusId: parseInt(o.current_state || 0),
         totalProducts: parseFloat(o.total_products) || 0, // Variable A (HT products without shipping)
         totalPaidTaxExcl: parseFloat(o.total_paid_tax_excl) || 0 // Variable B (HT actually paid by customer)
@@ -72,61 +102,108 @@ const fetchStats = async () => {
       }
     })
 
+    // Map: id_stock -> id_product
+    const stockIdToProductId = {}
+    stocks.forEach(st => {
+      const stockId = getVal(st.id)
+      const productId = getVal(st.id_product)
+      if (stockId && productId) {
+        stockIdToProductId[stockId] = productId
+      }
+    })
+
+    // Map: `${orderId}_${productId}` -> net movement quantity
+    const orderProductMovements = {}
+    stockMvts.forEach(mvt => {
+      const mvtStockId = getVal(mvt.id_stock)
+      const mvtOrderId = getVal(mvt.id_order)
+      const pId = stockIdToProductId[mvtStockId]
+      const sign = getVal(mvt.sign)
+      const qty = getVal(mvt.physical_quantity)
+
+      if (mvtOrderId && pId) {
+        const key = `${mvtOrderId}_${pId}`
+        if (!orderProductMovements[key]) {
+          orderProductMovements[key] = 0
+        }
+        orderProductMovements[key] += (qty * sign)
+      }
+    })
+
     // 1. Montant Total des Ventes (HT) - Chiffre d'Affaires (CA)
-    // We sum Variable B (total_paid_tax_excl) of all valid orders.
+    // We sum Variable B (total_paid_tax_excl) of all orders with status 2 (paiement effectué) or 5 (livré).
     let sumSales = 0
     orders.forEach(o => {
-      if (o.valid === '1') {
+      const statusId = parseInt(o.current_state || 0)
+      if (statusId === 2 || statusId === 5) {
         sumSales += parseFloat(o.total_paid_tax_excl) || 0
       }
     })
 
-    // 2. Montant Total d'Achat (HT) & Category Profits
-    // Loop through order details, keeping only rows corresponding to valid orders.
+    // 2. Montant Total d'Achat (HT) & Category Profits (using Real CA Method - Variable B)
+    // Loop through order details, keeping only rows corresponding to orders with status 2 or 5.
     let sumPurchases = 0
     const profitByCat = {}
     const reservedQuantityByProduct = {}
+    const reservedAlreadyDecrementedByProduct = {}
+    const reservedNotDecrementedByProduct = {}
 
     orderDetails.forEach(od => {
       const orderId = od.id_order
       const order = ordersMap[orderId]
-      const isValidOrder = order ? order.valid : false
+      const statusId = order ? order.statusId : 0
+      const isDeliveredOrPaid = statusId === 2 || statusId === 5
 
       const pId = od.product_id
       const qty = parseInt(od.product_quantity) || 0
       const salePrice = parseFloat(od.product_price) || 0 // unit price
       const totalSale = parseFloat(od.total_price_tax_excl) || (salePrice * qty)
 
-      // Get purchase price at checkout: purchase_supplier_price or original_wholesale_price
-      let wholesalePrice = parseFloat(od.purchase_supplier_price) || parseFloat(od.original_wholesale_price) || 0
-      // Fallback to catalog wholesale price if not recorded on order detail
-      if (!wholesalePrice && prodMap[pId]) {
-        wholesalePrice = prodMap[pId].wholesale_price
-      }
-      const totalPurchaseForOd = wholesalePrice * qty
+      // Get purchase price at checkout (Variable D): purchase_supplier_price or original_wholesale_price
+      const purchasePrice = parseFloat(od.purchase_supplier_price) || parseFloat(od.original_wholesale_price) || 0
+      const totalPurchaseForOd = purchasePrice * qty
 
       const catId = prodMap[pId] ? prodMap[pId].categoryId : 'unknown'
 
-      // Keep only valid orders for sales/purchases totals and breakdown
-      if (isValidOrder) {
+      // Keep only valid orders (delivered or paid) for sales/purchases totals and breakdown
+      if (isDeliveredOrPaid) {
         sumPurchases += totalPurchaseForOd
+
+        // Attributed sales using Real CA Method (Variable B distributed proportionally to product shares in the order)
+        let realSaleForOd = 0
+        if (order.totalProducts > 0) {
+          const ratio = totalSale / order.totalProducts
+          realSaleForOd = order.totalPaidTaxExcl * ratio
+        } else {
+          realSaleForOd = totalSale
+        }
 
         if (!profitByCat[catId]) {
           profitByCat[catId] = { sales: 0, purchases: 0, profit: 0 }
         }
-        // Since we are showing breakdown per category, we use total_price_tax_excl of products in valid orders.
-        profitByCat[catId].sales += totalSale
+        profitByCat[catId].sales += realSaleForOd
         profitByCat[catId].purchases += totalPurchaseForOd
-        profitByCat[catId].profit += (totalSale - totalPurchaseForOd)
+        profitByCat[catId].profit += (realSaleForOd - totalPurchaseForOd)
       }
 
       // Calculate reserved quantity: order exists, status is not livré (5) and not annulé (6)
-      const statusId = order ? order.statusId : 0
       if (statusId !== 5 && statusId !== 6) {
+        const key = `${orderId}_${pId}`
+        const netMvt = orderProductMovements[key] || 0
+
+        // Determine if stock was already decremented for this item
+        const mvtQty = Math.abs(netMvt)
+        const decrementedPart = Math.min(qty, mvtQty)
+        const nonDecrementedPart = Math.max(0, qty - mvtQty)
+
         if (!reservedQuantityByProduct[pId]) {
           reservedQuantityByProduct[pId] = 0
+          reservedAlreadyDecrementedByProduct[pId] = 0
+          reservedNotDecrementedByProduct[pId] = 0
         }
         reservedQuantityByProduct[pId] += qty
+        reservedAlreadyDecrementedByProduct[pId] += decrementedPart
+        reservedNotDecrementedByProduct[pId] += nonDecrementedPart
       }
     })
 
@@ -138,7 +215,8 @@ const fetchStats = async () => {
     const stockByCat = {}
     stocks.forEach(st => {
       // Skip stock for combinations to get the total product stock (id_product_attribute = 0)
-      if (String(st.id_product_attribute) !== '0') return
+      const idAttr = String(getVal(st.id_product_attribute))
+      if (idAttr !== '0') return
 
       const pId = st.id_product
       const catId = prodMap[pId] ? prodMap[pId].categoryId : 'unknown'
@@ -147,9 +225,13 @@ const fetchStats = async () => {
         stockByCat[catId] = { physical: 0, reserved: 0, available: 0 }
       }
 
-      const available = parseInt(st.quantity || 0)
       const reserved = reservedQuantityByProduct[pId] || 0
-      const physical = available + reserved
+      const reservedAlreadyDec = reservedAlreadyDecrementedByProduct[pId] || 0
+      const reservedNotDec = reservedNotDecrementedByProduct[pId] || 0
+
+      // Formule ajustée en prenant en compte les mouvements de stock déjà effectués
+      const available = parseInt(st.quantity || 0) - reservedNotDec
+      const physical = parseInt(st.quantity || 0) + reservedAlreadyDec
 
       stockByCat[catId].physical += physical
       stockByCat[catId].reserved += reserved
@@ -165,6 +247,18 @@ const fetchStats = async () => {
     state.loading = false
   }
 }
+
+const totals = computed(() => {
+  let sales = 0
+  let purchases = 0
+  let profit = 0
+  Object.values(state.profitByCategory).forEach(stats => {
+    sales += stats.sales
+    purchases += stats.purchases
+    profit += stats.profit
+  })
+  return { sales, purchases, profit }
+})
 
 onMounted(() => {
   fetchStats()
@@ -233,6 +327,16 @@ const formatEur = (amount) => {
                 <td colspan="4" class="text-center">Aucune donnée de vente disponible.</td>
               </tr>
             </tbody>
+            <tfoot v-if="Object.keys(state.profitByCategory).length > 0">
+              <tr>
+                <td>Total</td>
+                <td>{{ formatEur(totals.sales) }}</td>
+                <td>{{ formatEur(totals.purchases) }}</td>
+                <td :class="totals.profit >= 0 ? 'text-green' : 'text-red'">
+                  {{ formatEur(totals.profit) }}
+                </td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>
@@ -375,6 +479,16 @@ const formatEur = (amount) => {
 
 .table tbody tr:hover {
   background-color: #f3f4f6;
+}
+
+.table tfoot tr {
+  font-weight: bold;
+  background-color: #f9fafb;
+  border-top: 2px solid #e5e7eb;
+}
+
+.table tfoot td {
+  padding: 1rem;
 }
 
 .text-green { color: #10b981; font-weight: 500; }
