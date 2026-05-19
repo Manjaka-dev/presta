@@ -27,9 +27,9 @@ const fetchStats = async () => {
     const [catRes, prodRes, orderDetailsRes, stockRes, ordersRes] = await Promise.all([
       apiCategories.list({ display: '[id,name]', limit: 1000 }),
       apiProducts.list({ display: '[id,id_category_default,price,wholesale_price]', limit: 5000 }),
-      apiOrderDetails.list({ display: '[id,id_order,product_id,product_quantity,product_price,total_price_tax_excl,purchase_supplier_price]', limit: 5000 }),
+      apiOrderDetails.list({ display: '[id,id_order,product_id,product_quantity,product_price,total_price_tax_excl,purchase_supplier_price,original_wholesale_price]', limit: 5000 }),
       apiStock.list({ display: '[id,id_product,id_product_attribute,quantity]', limit: 5000 }),
-      apiOrders.list({ display: '[id,valid,current_state]', limit: 5000 })
+      apiOrders.list({ display: '[id,valid,current_state,total_paid_tax_excl,total_products]', limit: 5000 })
     ])
 
     const categories = extractItems(catRes, apiCategories.resource)
@@ -51,12 +51,14 @@ const fetchStats = async () => {
     })
     state.categories = catMap
 
-    // Build orders map with validity and status
+    // Build orders map with validity, status, and sales variables
     const ordersMap = {}
     orders.forEach(o => {
       ordersMap[o.id] = {
         valid: o.valid === '1',
-        statusId: parseInt(o.current_state || 0)
+        statusId: parseInt(o.current_state || 0),
+        totalProducts: parseFloat(o.total_products) || 0, // Variable A (HT products without shipping)
+        totalPaidTaxExcl: parseFloat(o.total_paid_tax_excl) || 0 // Variable B (HT actually paid by customer)
       }
     })
 
@@ -70,37 +72,55 @@ const fetchStats = async () => {
       }
     })
 
-    // Calculate Sales, Purchases, and Reserved stock from Order Details
+    // 1. Montant Total des Ventes (HT) - Chiffre d'Affaires (CA)
+    // We sum Variable B (total_paid_tax_excl) of all valid orders.
     let sumSales = 0
+    orders.forEach(o => {
+      if (o.valid === '1') {
+        sumSales += parseFloat(o.total_paid_tax_excl) || 0
+      }
+    })
+
+    // 2. Montant Total d'Achat (HT) & Category Profits
+    // Loop through order details, keeping only rows corresponding to valid orders.
     let sumPurchases = 0
     const profitByCat = {}
     const reservedQuantityByProduct = {}
 
     orderDetails.forEach(od => {
+      const orderId = od.id_order
+      const order = ordersMap[orderId]
+      const isValidOrder = order ? order.valid : false
+
       const pId = od.product_id
       const qty = parseInt(od.product_quantity) || 0
       const salePrice = parseFloat(od.product_price) || 0 // unit price
       const totalSale = parseFloat(od.total_price_tax_excl) || (salePrice * qty)
 
-      let wholesalePrice = parseFloat(od.purchase_supplier_price) || 0
+      // Get purchase price at checkout: purchase_supplier_price or original_wholesale_price
+      let wholesalePrice = parseFloat(od.purchase_supplier_price) || parseFloat(od.original_wholesale_price) || 0
+      // Fallback to catalog wholesale price if not recorded on order detail
       if (!wholesalePrice && prodMap[pId]) {
         wholesalePrice = prodMap[pId].wholesale_price
       }
       const totalPurchaseForOd = wholesalePrice * qty
 
-      sumSales += totalSale
-      sumPurchases += totalPurchaseForOd
-
       const catId = prodMap[pId] ? prodMap[pId].categoryId : 'unknown'
-      if (!profitByCat[catId]) {
-        profitByCat[catId] = { sales: 0, purchases: 0, profit: 0 }
+
+      // Keep only valid orders for sales/purchases totals and breakdown
+      if (isValidOrder) {
+        sumPurchases += totalPurchaseForOd
+
+        if (!profitByCat[catId]) {
+          profitByCat[catId] = { sales: 0, purchases: 0, profit: 0 }
+        }
+        // Since we are showing breakdown per category, we use total_price_tax_excl of products in valid orders.
+        profitByCat[catId].sales += totalSale
+        profitByCat[catId].purchases += totalPurchaseForOd
+        profitByCat[catId].profit += (totalSale - totalPurchaseForOd)
       }
-      profitByCat[catId].sales += totalSale
-      profitByCat[catId].purchases += totalPurchaseForOd
-      profitByCat[catId].profit += (totalSale - totalPurchaseForOd)
 
       // Calculate reserved quantity: order exists, status is not livré (5) and not annulé (6)
-      const order = ordersMap[od.id_order]
       const statusId = order ? order.statusId : 0
       if (statusId !== 5 && statusId !== 6) {
         if (!reservedQuantityByProduct[pId]) {
