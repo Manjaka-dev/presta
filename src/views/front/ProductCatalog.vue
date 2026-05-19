@@ -38,12 +38,25 @@ const LOW_STOCK_THRESHOLD = 5
 // --- Badges HOT / NEW ---
 const getBadge = (dateStr) => {
   if (!dateStr || dateStr === '0000-00-00') return null
-  const added = new Date(dateStr)
-  if (isNaN(added.getTime())) return null // Check if date is valid
+  
+  // Format can be YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
+  const parts = dateStr.split(' ')[0].split('-')
+  if (parts.length !== 3) return null
+  
+  const year = parseInt(parts[0], 10)
+  const month = parseInt(parts[1], 10) - 1 // 0-indexed in JS
+  const day = parseInt(parts[2], 10)
+  
+  if (isNaN(year) || isNaN(month) || isNaN(day)) return null
+  
+  const addedDate = new Date(year, month, day)
   const now = new Date()
-  const diffDays = (now - added) / (1000 * 60 * 60 * 24)
-  if (diffDays <= 1) return 'HOT'
-  if (diffDays <= 7) return 'NEW'
+  const nowDate = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  
+  const diffDays = Math.round((nowDate - addedDate) / (1000 * 60 * 60 * 24))
+  
+  if (diffDays >= 0 && diffDays <= 1) return 'HOT'
+  if (diffDays >= 0 && diffDays <= 7) return 'NEW'
   return null
 }
 
