@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive } from 'vue'
+import {ref, reactive, watch} from 'vue'
 import { parseCsvFile, validateHeaders } from '@/api/import/csvParser'
 import { runImport } from '@/api/import/importService'
 import { runReset } from '@/api/import/resetService'
@@ -12,6 +12,8 @@ const sections = reactive({
 })
 
 const logs = ref([])
+
+const enable_images = ref(false);
 
 function addLog(msg) {
   logs.value.push({ time: new Date().toLocaleTimeString(), msg })
@@ -91,7 +93,7 @@ async function startImport(target) {
 
 const anyRunning = ref(false)
 
-async function startAll() {
+async function startAll(enable_images) {
   if (anyRunning.value) return
   anyRunning.value = true
   logs.value = []
@@ -99,9 +101,18 @@ async function startAll() {
   const steps = [
     { target: 'products', label: 'Produits' },
     { target: 'stocks', label: 'Stocks' },
-    { target: 'orders', label: 'Commandes' },
-    { target: 'images', label: 'Images' }
+    { target: 'orders', label: 'Commandes' }
+
   ]
+
+  if (!enable_images) {
+    steps = [
+      { target: 'products', label: 'Produits' },
+      { target: 'stocks', label: 'Stocks' },
+      { target: 'orders', label: 'Commandes' },
+      { target: 'images', label: 'Images' }
+    ]
+  }
 
   try {
     for (const step of steps) {
@@ -252,6 +263,10 @@ async function startAll() {
         >
           {{ sections.images.running ? 'Import en cours...' : 'Importer les images' }}
         </button>
+        <div>
+          <label for="enable_image" id="enable_image" ></label>
+          <input type="checkbox" name="enable_image" id="enable_image" v-model="enable_images"  >
+        </div>
       </div>
     </div>
 
@@ -260,7 +275,7 @@ async function startAll() {
       <button
         class="import-page__btn-all"
         :disabled="anyRunning"
-        @click="startAll"
+        @click="startAll(enable_images)"
       >
         {{ anyRunning ? 'Import séquentiel en cours...' : '🚀 Tout importer (séquentiel)' }}
       </button>

@@ -15,6 +15,7 @@ import { slugify, toFloat, toInt, formatMoney } from '@/utils/stringUtils'
 import { ensureTaxSystem, getTaxRateByGroupId } from './taxesService'
 
 export const ENABLE_NEGATIVE_STOCK_CHECK = true;
+export const UPDATE_ORDER_IF_EXISTS = false;
 
 function validateData(target, rows) {
   const dateRegex = /^\d{2}\/\d{2}\/\d{4}$/
@@ -264,7 +265,7 @@ async function importStocks(rows, progress) {
 async function importOrders(rows, progress) {
   let success = 0
   const config = buildOrderConfig()
-  const cache = new Map()
+  const cache = UPDATE_ORDER_IF_EXISTS ? new Map() : null
   
   try {
     validateOrderConfig(config)
